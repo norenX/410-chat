@@ -1,0 +1,9 @@
+.git
+.env*
+!.env.example
+node_modules
+dist-client
+dist-server
+test-results
+playwright-report
+npm-debug.log*

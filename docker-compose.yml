@@ -1,0 +1,38 @@
+services:
+  chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: 410-chat:local
+    restart: unless-stopped
+    init: true
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    ports:
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      METRICS_FILE: ${METRICS_FILE:-/data/metrics.json}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      HARD_TTL_MS: ${HARD_TTL_MS:-1800000}
+      DISCONNECT_GRACE_MS: ${DISCONNECT_GRACE_MS:-15000}
+      HEARTBEAT_EVERY_MS: ${HEARTBEAT_EVERY_MS:-5000}
+      HEARTBEAT_STALE_MS: ${HEARTBEAT_STALE_MS:-12000}
+      MAX_CREATES_PER_WINDOW: ${MAX_CREATES_PER_WINDOW:-10}
+      MAX_CONNECTIONS_PER_WINDOW: ${MAX_CONNECTIONS_PER_WINDOW:-60}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+    read_only: true
+    volumes:
+      - metrics_data:/data
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  metrics_data:

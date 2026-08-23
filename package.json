@@ -1,0 +1,46 @@
+{
+  "name": "410-chat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One-time, two-person, end-to-end encrypted conversations",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "tsx watch server/index.ts",
+    "build": "vite build && tsc -p tsconfig.server.json",
+    "start": "node dist-server/server/index.js",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test": "vitest run --exclude tests/browser/**",
+    "test:browser": "playwright test",
+    "test:all": "npm run build && npm run typecheck && npm test && npm run test:browser",
+    "lint": "eslint client server tests --max-warnings=0"
+  },
+  "dependencies": {
+    "libsodium-wrappers": "^0.7.15",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@playwright/test": "^1.55.0",
+    "@types/libsodium-wrappers": "^0.7.14",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "6.0.2",
+    "eslint": "9.39.4",
+    "eslint-plugin-jsx-a11y": "6.10.2",
+    "eslint-plugin-react": "7.37.5",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "16.4.0",
+    "tsx": "^4.20.5",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.59.3",
+    "vite": "8.2.2",
+    "vitest": "^3.2.4"
+  },
+  "type": "module"
+}
