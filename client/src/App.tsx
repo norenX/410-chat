@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClientCommand, Role, ServerEvent } from "../../shared/protocol.js";
 import { CryptoSession, createLinkSecret, sodiumReady, type DecryptedMessage } from "./crypto-session";
+import { QrInviteDialog } from "./QrInviteDialog";
 
 type View = "loading" | "landing" | "security" | "creating" | "connecting" | "waiting" | "handshaking" | "active" | "reconnecting";
 type CopyState = "copied" | "manual";
@@ -96,6 +97,7 @@ export function App() {
   const [destroyConfirm, setDestroyConfirm] = useState(false);
   const [destroying, setDestroying] = useState(false);
   const [infoPanel, setInfoPanel] = useState<InfoPanel>(null);
+  const [qrOpen, setQrOpen] = useState(false);
 
   const socketRef = useRef<WebSocket | undefined>(undefined);
   const cryptoRef = useRef<CryptoSession | undefined>(undefined);
@@ -108,6 +110,9 @@ export function App() {
   const creatingRef = useRef(false);
   const messageListRef = useRef<HTMLElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
+  const qrTriggerRef = useRef<HTMLButtonElement | null>(null);
+
+  const closeQr = useCallback(() => setQrOpen(false), []);
 
   function send(command: ClientCommand): void {
     if (socketRef.current?.readyState === WebSocket.OPEN) socketRef.current.send(JSON.stringify(command));
@@ -526,11 +531,19 @@ export function App() {
             <button type="button" onClick={copyInvite} aria-label="Copy invite link" title="Copy link"><span aria-hidden="true">⧉</span></button>
           </div>
           {copyState === "manual" && <p className="manual-copy">Clipboard access is unavailable. Copy the link manually.</p>}
+          {inviteUrl && (
+            <button ref={qrTriggerRef} className="qr-action" type="button" onClick={() => setQrOpen(true)}>
+              Show QR <span aria-hidden="true">→</span>
+            </button>
+          )}
           <p className="waiting-status"><span aria-hidden="true">●</span> Waiting for one person.</p>
           <p className="ttl-note">This room will be destroyed<br />30 minutes after the conversation starts.</p>
           <InfoLinks onOpen={setInfoPanel} />
         </section>
         <InfoDialog panel={infoPanel} onClose={() => setInfoPanel(null)} />
+        {qrOpen && inviteUrl && (
+          <QrInviteDialog inviteUrl={inviteUrl} onClose={closeQr} returnFocusRef={qrTriggerRef} />
+        )}
       </main>
     );
   }

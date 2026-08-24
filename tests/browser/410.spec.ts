@@ -269,6 +269,115 @@ test("a denied Clipboard API leaves the invite visible and manually selectable",
   await context.close();
 });
 
+test("Waiting shows the exact existing invite as a local, accessible QR without network or lifecycle changes", async ({ browser, baseURL }) => {
+  const context = await browser.newContext();
+  await installWorkingClipboard(context);
+  const page = await context.newPage();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const observedRequests: string[] = [];
+  page.on("request", (request) => observedRequests.push(request.url()));
+
+  await expect.poll(async () => {
+    const response = await page.request.get(`${baseURL}/__stats`);
+    return ((await response.json()) as { now: { waiting: number } }).now.waiting;
+  }).toBe(0);
+
+  await page.goto(baseURL!, { waitUntil: "load" });
+  await expect(page.getByRole("button", { name: "Show QR", exact: true })).toHaveCount(0);
+  await expect(page.locator("[data-qr-value]")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Start" }).click();
+  await expect(page.getByText("Waiting for one person.")).toBeVisible();
+  const invite = await page.getByLabel("One-time conversation link").inputValue();
+  expect(invite).toContain("#secret=");
+  const showQr = page.getByRole("button", { name: "Show QR", exact: true });
+  await expect(showQr).toBeVisible();
+  await expect(page.locator("[data-qr-value]")).toHaveCount(0);
+
+  const statsBeforeResponse = await page.request.get(`${baseURL}/__stats`);
+  const statsBefore = await statsBeforeResponse.json() as {
+    now: { waiting: number; active: number };
+    totals: { rooms_created: number };
+  };
+  expect(statsBefore.now.waiting).toBe(1);
+  const requestsBeforeShow = observedRequests.length;
+
+  await showQr.click();
+  const dialog = page.getByRole("dialog", { name: "QR invite" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Scan to join", exact: true })).toBeVisible();
+  await expect(dialog.getByText("This invite can be used once.", { exact: true })).toBeVisible();
+  const close = dialog.getByRole("button", { name: "Close", exact: true });
+  await expect(close).toBeFocused();
+  const qr = dialog.locator("svg.qr-code");
+  await expect(qr).toHaveAttribute("data-qr-value", invite);
+  await expect(qr).toHaveAttribute("data-quiet-zone", "4");
+  await expect(qr.locator("path")).toHaveAttribute("d", /M/);
+  await page.waitForTimeout(100);
+
+  const mobileLayout = await page.evaluate(() => {
+    const dialogElement = document.querySelector<HTMLElement>(".qr-dialog")!;
+    const qrElement = document.querySelector<SVGElement>(".qr-code")!;
+    const dialogRect = dialogElement.getBoundingClientRect();
+    const qrRect = qrElement.getBoundingClientRect();
+    return {
+      viewportWidth: innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      dialogLeft: dialogRect.left,
+      dialogRight: dialogRect.right,
+      dialogWidth: dialogRect.width,
+      qrLeft: qrRect.left,
+      qrRight: qrRect.right,
+      qrWidth: qrRect.width
+    };
+  });
+  expect(mobileLayout.scrollWidth).toBeLessThanOrEqual(mobileLayout.viewportWidth);
+  expect(mobileLayout.dialogLeft).toBeGreaterThanOrEqual(20);
+  expect(mobileLayout.dialogRight).toBeLessThanOrEqual(mobileLayout.viewportWidth - 20);
+  expect(mobileLayout.dialogWidth).toBeLessThanOrEqual(360);
+  expect(mobileLayout.qrLeft).toBeGreaterThanOrEqual(mobileLayout.dialogLeft);
+  expect(mobileLayout.qrRight).toBeLessThanOrEqual(mobileLayout.dialogRight);
+  expect(mobileLayout.qrWidth).toBeGreaterThanOrEqual(240);
+  expect(observedRequests).toHaveLength(requestsBeforeShow);
+  expect(observedRequests.every((url) => new URL(url).origin === new URL(baseURL!).origin)).toBe(true);
+  expect(observedRequests.every((url) => !url.includes("#secret="))).toBe(true);
+
+  const statsAfterResponse = await page.request.get(`${baseURL}/__stats`);
+  const statsAfter = await statsAfterResponse.json() as typeof statsBefore;
+  expect(statsAfter.totals.rooms_created).toBe(statsBefore.totals.rooms_created);
+  expect(statsAfter.now).toEqual(statsBefore.now);
+
+  await close.click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator("[data-qr-value]")).toHaveCount(0);
+  await expect(showQr).toBeFocused();
+
+  await showQr.click();
+  await expect(page.getByRole("dialog", { name: "QR invite" }).locator("svg.qr-code")).toHaveAttribute("data-qr-value", invite);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "QR invite" })).toHaveCount(0);
+  await expect(showQr).toBeFocused();
+
+  const joinerContext = await browser.newContext();
+  const joiner = await joinerContext.newPage();
+  const joinerRequests: string[] = [];
+  joiner.on("request", (request) => joinerRequests.push(request.url()));
+  const inviteResponse = await joiner.goto(invite, { waitUntil: "commit" });
+  expect(inviteResponse?.status()).toBe(200);
+  await expect(page.locator("#message")).toBeEnabled();
+  await expect(joiner.locator("#message")).toBeEnabled();
+  expect(joinerRequests.every((url) => !url.includes("#secret="))).toBe(true);
+
+  const consumedResponse = await joinerContext.request.get(invite);
+  expect(consumedResponse.status()).toBe(410);
+  await page.locator(".session-header").getByRole("button", { name: "Destroy" }).click();
+  await page.getByRole("dialog", { name: "Destroy this conversation?" }).getByRole("button", { name: "Destroy" }).click();
+  await waitForGone(page);
+  await waitForGone(joiner);
+  await context.close();
+  await joinerContext.close();
+});
+
 test("Security modal links to a direct, refreshable, inert Security page", async ({ browser, baseURL }) => {
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -360,7 +469,8 @@ test("Security modal links to a direct, refreshable, inert Security page", async
   expect(refreshed?.status()).toBe(200);
   await expect(page.getByRole("heading", { level: 1, name: "Security", exact: true })).toBeVisible();
 
-  const directPage = await context.newPage();
+  const directContext = await browser.newContext();
+  const directPage = await directContext.newPage();
   const directResponse = await directPage.goto(`${baseURL}/security`, { waitUntil: "commit" });
   expect(directResponse?.status()).toBe(200);
   await expect(directPage.getByRole("heading", { level: 1, name: "Security", exact: true })).toBeVisible();
@@ -386,6 +496,7 @@ test("Security modal links to a direct, refreshable, inert Security page", async
   expect(layout.background).toBe("rgb(255, 255, 255)");
   expect(layout.backgroundImage).toBe("none");
 
+  await directContext.close();
   await context.close();
 });
 

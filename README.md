@@ -16,7 +16,7 @@ Sometimes two people need a private conversation without exchanging a permanent 
 
 1. Open the site.
 2. Create a one-time link.
-3. Send it to one person.
+3. Copy the link or show its locally generated QR code to one person.
 4. Talk.
 5. Destroy the conversation, disconnect, or let it expire.
 6. The conversation URL becomes HTTP `410 Gone`.
@@ -162,6 +162,7 @@ High-level flow:
 ```
 
 3. URL fragments are not sent to the server as part of the HTTP request.
+   The optional invite QR is generated locally in the browser from this same full URL. The fragment secret is not sent to a QR service, and QR generation requires no third-party network request.
 4. Both browsers create ephemeral X25519 key pairs using `crypto_kx`.
 5. Offer and answer messages are authenticated with the link secret.
 6. The handshake transcript binds the room ID, handshake ID and both public keys.
