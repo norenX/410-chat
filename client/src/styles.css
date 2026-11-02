@@ -159,6 +159,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   text-decoration: none;
 }
 
+.security-source {
+  color: #555;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.security-source:hover { color: #111; text-decoration: underline; text-underline-offset: 4px; }
+
 .info-dialog-actions a {
   color: #111;
   font-size: 14px;

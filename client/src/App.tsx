@@ -637,6 +637,12 @@ function SecurityPage() {
       <article className="security-document">
         <header className="security-header">
           <a className="security-brand" href="/" aria-label="410">410</a>
+          <a
+            className="security-source"
+            href="https://github.com/norenX/410-chat"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Source code → GitHub</a>
         </header>
 
         <h1>Security</h1>

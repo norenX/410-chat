@@ -451,6 +451,10 @@ test("Security modal links to a direct, refreshable, inert Security page", async
     "410 should not be treated as a guarantee of anonymity."
   ]);
   await expect(page.getByRole("link", { name: "410", exact: true })).toHaveAttribute("href", "/");
+  const sourceLink = page.getByRole("link", { name: "Source code → GitHub", exact: true });
+  await expect(sourceLink).toHaveAttribute("href", "https://github.com/norenX/410-chat");
+  await expect(sourceLink).toHaveAttribute("target", "_blank");
+  await expect(sourceLink).toHaveAttribute("rel", "noopener noreferrer");
   await expect(page.getByRole("button", { name: "Start", exact: true })).toHaveCount(0);
   await expect(page.locator("button, nav, footer, img, svg, canvas")).toHaveCount(0);
 
