@@ -176,7 +176,7 @@ describe("410 lifecycle", () => {
 
     const { response, stats } = await getStats(httpUrl);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(Object.keys(stats)).toEqual(["startedAt", "uptimeSeconds", "now", "today", "totals", "sources"]);
+    expect(Object.keys(stats)).toEqual(["startedAt", "uptimeSeconds", "now", "today", "totals", "sources", "groups"]);
     expect(Object.keys(stats.totals)).toEqual([...METRIC_NAMES]);
     expect(stats.now).toEqual({ waiting: 0, active: 0 });
     expect(stats.totals).toEqual({

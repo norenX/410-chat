@@ -1,8 +1,10 @@
 # 410
 
-**One link → two people → one end-to-end encrypted conversation → gone.**
+**One link → an end-to-end encrypted conversation → gone.**
 
-410 is a minimal disposable chat for exactly two browsers.
+410 is a minimal disposable chat. Its primary mode remains a one-time
+conversation for exactly two browsers. An experimental, feature-flagged group
+room mode is available for DEV evaluation.
 
 There are no accounts, usernames, contact lists, public rooms, message history, file uploads, or conversation database.
 
@@ -22,6 +24,31 @@ Sometimes two people need a private conversation without exchanging a permanent 
 6. The conversation URL becomes HTTP `410 Gone`.
 
 It is intentionally not a general-purpose messenger.
+
+## Experimental group rooms
+
+Group rooms are disabled by default and must be enabled explicitly:
+
+```text
+GROUP_ROOMS_ENABLED=true
+```
+
+They are a DEV-only feature until the separate Group E2EE v1 protocol and its
+implementation receive an independent security review. Enabling the flag does
+not imply that the protocol has been audited or is ready for production.
+
+The current group-room limits are:
+
+- reusable invite while the room is alive;
+- up to 10 simultaneous participants;
+- 15-second disconnect grace;
+- rekey on join, final leave, and reconnect;
+- absolute 24-hour TTL from creation;
+- no server-side message history or replay;
+- a separate creator capability for early destruction.
+
+See [docs/group-e2ee-v1.md](docs/group-e2ee-v1.md) for the exact experimental
+protocol, threat model, transcript encoding, and known limitations.
 
 ## Quick start
 
@@ -87,7 +114,7 @@ Otherwise a direct client could spoof forwarded IP headers and interfere with IP
 
 - React + TypeScript frontend built with Vite.
 - One Node.js HTTP/WebSocket process using `ws`.
-- Room state exists only in application memory.
+- Direct and group room state exists only in application memory.
 - No Redis.
 - No conversation database.
 - No server-side message history.
@@ -111,6 +138,10 @@ Room ID, invite token and resume credentials are separate cryptographically rand
 When a room is destroyed, its room state, invite index, resume hashes, connection context and timers are removed from the application's in-memory store.
 
 A process restart destroys all active rooms.
+
+Group rooms use a separate manager, WebSocket protocol, invite namespace and
+crypto session. The existing two-browser lifecycle and crypto implementation
+are not generalized or replaced by the group feature.
 
 ## Conversation lifetime
 
@@ -178,6 +209,23 @@ This is a custom PSK-authenticated protocol built from standard primitives. It i
 
 See [SECURITY.md](SECURITY.md).
 
+### Experimental Group E2EE v1
+
+Group rooms use membership epochs. Each epoch has fresh ephemeral X25519
+contributions and pairwise directional keys. A random content key encrypts each
+message once; that content key is wrapped separately for every current
+recipient. XChaCha20-Poly1305, authenticated metadata, monotonically increasing
+per-pair sequences, mutual confirmation, and a common epoch-digest ready
+barrier are used before application messages are enabled.
+
+The shared invite fragment secret authenticates admission to a room. It is not
+a persistent participant identity. Membership metadata and encrypted frames
+are relayed by the server, but usable message keys and plaintext are not part
+of server room state.
+
+This is a custom experimental protocol. It has not undergone an independent
+security audit and must not be represented as production-audited cryptography.
+
 ## What the relay can see
 
 While a connection exists, the server necessarily processes operational metadata including:
@@ -219,7 +267,8 @@ Relay frames are forwarded to the peer and are not stored as message history.
 
 `GET /__stats` exposes aggregate service counters.
 
-The current metrics schema is version 2.
+The current metrics schema is version 3. Version 1 and version 2 files are
+migrated without changing their existing direct-conversation counters.
 
 It contains:
 
@@ -266,6 +315,11 @@ Unknown values are normalized rather than creating arbitrary metric keys.
 
 Other global counters include room destruction reasons and HTTP 410 responses.
 
+Experimental group-room counters are stored in a separate `groups` section so
+that historical one-to-one metrics keep their existing meaning. The compact
+`scripts/stats.sh` output intentionally remains focused on the established
+one-to-one counters.
+
 The metrics file contains no user-level or conversation-level analytics.
 
 Docker Compose persists the metrics file in a named volume mounted at `/data`.
@@ -281,6 +335,11 @@ The MVP includes:
 - relay-frequency rate limiting;
 - WebSocket frame-size limits;
 - relay-payload limits;
+- a global cap on simultaneously existing group rooms;
+- a lower cap on rooms that currently hold no participant slot;
+- a hard 10-participant group-room cap;
+- separate application-message and structurally bounded group-control budgets;
+- per-socket all-frame count/byte ceilings and slow-consumer backpressure cutoff;
 - plaintext message-size limits;
 - input type and format validation;
 - binary WebSocket frame rejection;
@@ -342,6 +401,8 @@ The suite covers, among other things:
 - HTTP 410 behavior and headers;
 - absence of automatic room creation;
 - two-browser encrypted message exchange;
+- multi-browser group epoch establishment and encrypted message exchange;
+- group join/leave/reconnect rekey and replay rejection;
 - reconnect and rekey;
 - disconnect grace;
 - TTL behavior;
@@ -374,11 +435,14 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 
 410 deliberately keeps the feature set narrow.
 
-The core product is:
+The primary product remains:
 
 ```text
 one link → two people → conversation → gone
 ```
+
+The optional group-room experiment follows the same ephemeral/no-history
+principle without introducing accounts, member profiles, or persistent rooms.
 
 Features that turn it into a persistent messenger are intentionally out of scope.
 

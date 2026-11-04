@@ -146,7 +146,8 @@ test("home is inert; Start creates exactly one room and copies its one-time link
   await expect(page.getByText("How it works", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Security →", exact: true })).toBeVisible();
   await expect(page.locator(".start-page a")).toHaveCount(1);
-  await expect(page.locator(".start-page button")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Create a room", exact: true })).toBeVisible();
+  await expect(page.locator(".start-page button")).toHaveCount(2);
   await expect(page.locator(".start-page nav, .start-page footer, .start-page article")).toHaveCount(0);
 
   const desktop = await page.evaluate(() => {
@@ -394,9 +395,9 @@ test("Security modal links to a direct, refreshable, inert Security page", async
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("heading", { name: "Security", exact: true })).toBeVisible();
   expect(await dialog.locator("p").innerText()).toBe([
-    "Messages are encrypted in the browsers before being relayed.",
+    "Messages in 1-to-1 conversations and temporary rooms are encrypted in the browsers before being relayed.",
     "The server does not receive message plaintext.",
-    "Your peer can still copy or record what they see."
+    "Other participants can still copy or record what they see."
   ].join("\n"));
   await expect(dialog.getByRole("link", { name: "Details →", exact: true })).toHaveAttribute("href", "/security");
   await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeVisible();
@@ -421,23 +422,29 @@ test("Security modal links to a direct, refreshable, inert Security page", async
     "What the server can see",
     "What is not kept",
     "Lifetime",
+    "Temporary rooms (experimental)",
     "After destruction",
     "Analytics",
     "Limitations"
   ]);
   expect(await page.locator(".security-document p").allTextContents()).toEqual([
-    "410 is designed for one-time conversations between two browsers.",
-    "Messages are end-to-end encrypted in the browsers before they are relayed.",
+    "410 is designed for temporary conversations between browsers.",
+    "Messages in 1-to-1 conversations and temporary rooms are end-to-end encrypted in the browsers before they are relayed.",
     "The server does not receive message plaintext or the session encryption keys.",
     "The server necessarily sees network metadata required to operate the service, including IP addresses, connection timing and encrypted network traffic.",
     "The relay also processes the protocol metadata necessary to establish and operate a conversation.",
     "410 does not keep conversation history, message plaintext, accounts or contact lists.",
     "Active rooms exist in server memory and disappear when they are destroyed, expire, or when the service process restarts.",
-    "A conversation has exactly two participants.",
+    "A 1-to-1 conversation has exactly two participants.",
     "An unused invite expires after 30 minutes.",
     "Once the second participant joins, the conversation can exist for up to 30 minutes.",
     "A consumed invite cannot be reused by another participant.",
     "If a participant disconnects, the conversation allows the existing reconnect grace period before it is destroyed.",
+    "A room allows up to 10 people to be present at once and expires 24 hours after it is created.",
+    "Its invite can be reused while the room exists. Only the creator capability can destroy it early.",
+    "Room messages are not stored or replayed. A browser sees only messages sent while it is connected to the current live session.",
+    "The encryption context changes when the active room membership changes.",
+    "Group E2EE v1 is experimental, available only when explicitly enabled, and has not undergone an independent security review.",
     "When a conversation is gone, the room is no longer available.",
     "Requests to its conversation URL return HTTP 410 Gone.",
     "410 does not keep a conversation archive or a recoverable history of destroyed rooms.",
@@ -502,6 +509,116 @@ test("Security modal links to a direct, refreshable, inert Security page", async
 
   await directContext.close();
   await context.close();
+});
+
+test("three contexts use a reusable no-history E2E room, rekey on membership changes, and end at HTTP 410", async ({ browser, baseURL }) => {
+  const creatorContext = await browser.newContext();
+  await installWorkingClipboard(creatorContext);
+  const creator = await creatorContext.newPage();
+  const sentFrames: string[] = [];
+  creator.on("websocket", (socket) => {
+    socket.on("framesent", (frame) => sentFrames.push(String(frame.payload)));
+  });
+  const before = await (await creator.request.get(`${baseURL}/__stats`)).json() as {
+    groups: { totals: Record<string, number> };
+  };
+
+  await creator.goto(baseURL!, { waitUntil: "domcontentloaded" });
+  await creator.getByRole("button", { name: "Create a room", exact: true }).click();
+  await expect(creator).toHaveURL(/\/g\/[A-Za-z0-9_-]{43}$/);
+  await expect(creator.getByText("1 person here", { exact: true })).toBeVisible();
+  const inviteInput = creator.getByLabel("Reusable room link");
+  await expect(inviteInput).toBeVisible();
+  const invite = await inviteInput.inputValue();
+  expect(invite).toMatch(new RegExp(`^${baseURL!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/g/[A-Za-z0-9_-]{43}#secret=`));
+  const ownerCapability = await creator.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { ownerCapability?: string } | null;
+    return session?.ownerCapability;
+  });
+  expect(ownerCapability).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(invite).not.toContain(ownerCapability!);
+
+  await creator.getByRole("button", { name: "Copy", exact: true }).click();
+  expect(await creator.evaluate(() => (window as ClipboardWindow).__copiedInvite)).toBe(invite);
+  const qrTrigger = creator.getByRole("button", { name: "Show QR", exact: true });
+  await qrTrigger.click();
+  const qrDialog = creator.getByRole("dialog", { name: "QR invite" });
+  await expect(qrDialog.getByText("This invite works while the room exists.", { exact: true })).toBeVisible();
+  await expect(qrDialog.locator("svg.qr-code")).toHaveAttribute("data-qr-value", invite);
+  await qrDialog.getByRole("button", { name: "Close" }).click();
+
+  const bContext = await browser.newContext();
+  const b = await bContext.newPage();
+  expect((await b.goto(invite, { waitUntil: "commit" }))?.status()).toBe(200);
+  await expect(creator.getByText("2 people here", { exact: true })).toBeVisible();
+  await expect(creator.locator("#group-message")).toBeEnabled();
+  await expect(b.locator("#group-message")).toBeEnabled();
+
+  await creator.locator("#group-message").fill("before third participant");
+  await creator.locator("#group-message").press("Enter");
+  await expect(b.getByText("before third participant", { exact: true })).toBeVisible();
+
+  const cContext = await browser.newContext();
+  const c = await cContext.newPage();
+  expect((await c.goto(invite, { waitUntil: "commit" }))?.status()).toBe(200);
+  await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
+  await expect(c.locator("#group-message")).toBeEnabled();
+  await expect(c.getByText("before third participant", { exact: true })).toHaveCount(0);
+
+  await creator.locator("#group-message").fill("after third participant");
+  await creator.locator("#group-message").press("Enter");
+  await expect(b.getByText("after third participant", { exact: true })).toBeVisible();
+  await expect(c.getByText("after third participant", { exact: true })).toBeVisible();
+  expect(sentFrames.join("\n")).not.toContain("before third participant");
+  expect(sentFrames.join("\n")).not.toContain("after third participant");
+
+  await cContext.close();
+  await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
+  await expect(creator.getByText("2 people here", { exact: true })).toBeVisible({ timeout: 8_000 });
+
+  const rejoinContext = await browser.newContext();
+  const rejoined = await rejoinContext.newPage();
+  expect((await rejoined.goto(invite, { waitUntil: "commit" }))?.status()).toBe(200);
+  await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
+  await expect(rejoined.locator("#group-message")).toBeEnabled();
+  await expect(rejoined.locator(".message")).toHaveCount(0);
+  await b.locator("#group-message").fill("after rejoin only");
+  await b.locator("#group-message").press("Enter");
+  await expect(creator.getByText("after rejoin only", { exact: true })).toBeVisible();
+  await expect(rejoined.getByText("after rejoin only", { exact: true })).toBeVisible();
+
+  await creator.reload({ waitUntil: "domcontentloaded" });
+  await expect(creator.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
+  await expect(creator.locator(".message")).toHaveCount(0);
+  await expect(creator.getByRole("button", { name: "Destroy room", exact: true })).toBeVisible();
+
+  const after = await (await creator.request.get(`${baseURL}/__stats`)).json() as typeof before;
+  expect(after.groups.totals.group_rooms_created - before.groups.totals.group_rooms_created).toBe(1);
+  expect(after.groups.totals.group_participants_joined - before.groups.totals.group_participants_joined).toBe(4);
+  expect(after.groups.totals.group_conversations_started - before.groups.totals.group_conversations_started).toBe(1);
+  expect(after.groups.totals.group_messages_relayed - before.groups.totals.group_messages_relayed).toBe(3);
+
+  await creator.getByRole("button", { name: "Destroy room", exact: true }).click();
+  const confirm = creator.getByRole("dialog", { name: "Destroy this room?" });
+  await expect(confirm).toBeVisible();
+  const creatorGone = creator.waitForResponse((response) => response.status() === 410 && response.request().resourceType() === "document");
+  const bGone = b.waitForResponse((response) => response.status() === 410 && response.request().resourceType() === "document");
+  const rejoinedGone = rejoined.waitForResponse((response) => response.status() === 410 && response.request().resourceType() === "document");
+  await confirm.getByRole("button", { name: "Destroy room", exact: true }).click();
+  expect((await creatorGone).status()).toBe(410);
+  expect((await bGone).status()).toBe(410);
+  expect((await rejoinedGone).status()).toBe(410);
+  await waitForGone(creator);
+  await waitForGone(b);
+  await waitForGone(rejoined);
+  const stale = await creatorContext.request.get(invite);
+  expect(stale.status()).toBe(410);
+  expect(stale.headers()["cache-control"]).toBe("no-store");
+  expect(stale.headers()["x-robots-tag"]).toBe("noindex, nofollow");
+
+  await creatorContext.close();
+  await bContext.close();
+  await rejoinContext.close();
 });
 
 test("two contexts exchange E2E messages; consumed invite is HTTP 410; disconnect burns the room", async ({ browser, baseURL }) => {

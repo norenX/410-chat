@@ -5,6 +5,7 @@ const QUIET_ZONE_MODULES = 4;
 
 interface QrInviteDialogProps {
   inviteUrl: string;
+  note?: string;
   onClose: () => void;
   returnFocusRef: RefObject<HTMLButtonElement | null>;
 }
@@ -19,7 +20,12 @@ function createQrPath(modules: boolean[][]): string {
   return path;
 }
 
-export function QrInviteDialog({ inviteUrl, onClose, returnFocusRef }: QrInviteDialogProps) {
+export function QrInviteDialog({
+  inviteUrl,
+  note = "This invite can be used once.",
+  onClose,
+  returnFocusRef
+}: QrInviteDialogProps) {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const qr = useMemo(() => {
     const modules = encodeQR(inviteUrl, "raw", { ecc: "medium" });
@@ -62,7 +68,7 @@ export function QrInviteDialog({ inviteUrl, onClose, returnFocusRef }: QrInviteD
           <rect width={qr.size} height={qr.size} fill="#fff" />
           <path d={qr.path} fill="#111" />
         </svg>
-        <p id="qr-note">This invite can be used once.</p>
+        <p id="qr-note">{note}</p>
         <button ref={closeButtonRef} type="button" onClick={onClose}>Close</button>
       </section>
     </div>

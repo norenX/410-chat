@@ -107,6 +107,31 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 
 .start-page .primary-action:hover { background: #000; border-color: #000; opacity: .82; }
 
+.start-actions { width: min(300px, 100%); }
+
+.start-action p {
+  margin: 9px 0 0;
+  color: #555;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.start-action + .start-action { margin-top: 22px; }
+
+.start-page .secondary-action {
+  width: 100%;
+  min-height: 54px;
+  border: 1px solid #aaa;
+  border-radius: 0;
+  background: #fff;
+  color: #111;
+  padding: 13px 28px;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.start-page .secondary-action:hover { border-color: #111; }
+
 .start-page .error-text {
   margin: 16px 0 0;
   color: #333;
@@ -364,6 +389,144 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   background: #fff;
 }
 
+.group-room-page {
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+}
+
+.group-room-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 72px;
+  padding: 14px clamp(20px, 5vw, 72px);
+  border-bottom: 1px solid var(--line);
+}
+
+.group-room-summary {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+}
+
+.group-room-label {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.group-presence {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.group-room-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.group-room-actions button {
+  border: 0;
+  background: transparent;
+  padding: 6px 0;
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.group-room-actions .group-destroy { color: #7d1717; }
+
+.group-invite-panel {
+  flex: 0 0 auto;
+  padding: 18px clamp(20px, 9vw, 150px) 20px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
+.group-invite-panel > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.group-invite-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.group-invite-row input {
+  min-width: 0;
+  border: 0;
+  border-bottom: 1px solid #999;
+  background: transparent;
+  padding: 9px 0;
+  color: #444;
+  font-size: 12px;
+}
+
+.group-invite-row button {
+  border: 0;
+  background: transparent;
+  padding: 9px 0;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.group-copy-state {
+  margin-top: 9px !important;
+  color: var(--quiet) !important;
+  font-size: 12px !important;
+}
+
+.group-empty-note {
+  margin: auto;
+  color: var(--quiet);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.group-full-content h1 {
+  margin: 0;
+  font-size: clamp(32px, 5vw, 46px);
+  line-height: 1.1;
+  letter-spacing: -.04em;
+}
+
+.group-full-content p {
+  margin: 22px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.group-full-content button {
+  margin-top: 30px;
+  border: 1px solid #111;
+  background: #111;
+  color: #fff;
+  padding: 11px 20px;
+  cursor: pointer;
+}
+
 .session-header {
   flex: 0 0 auto;
   display: flex;
@@ -580,6 +743,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .start-page .logo { margin-bottom: 32px; font-size: 54px; }
   .start-page .start-headline { font-size: clamp(42px, 12vw, 47px); }
   .start-page .start-intro { margin-top: 25px; font-size: 18px; }
+  .start-actions { width: 100%; }
   .start-page .primary-action { width: 100%; min-height: 58px; margin-top: 30px; }
   .start-technical { margin-top: 32px; }
   .security-page { padding: 44px 24px 64px; }
@@ -593,4 +757,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .message { max-width: 88%; }
   .composer { margin: 0; padding: 14px 20px max(18px, env(safe-area-inset-bottom)); }
   .connection-state { flex-direction: column; align-items: center; gap: 3px; }
+  .group-room-header { align-items: flex-start; gap: 14px; padding-top: 16px; padding-bottom: 16px; }
+  .group-room-summary { flex-direction: column; gap: 4px; }
+  .group-room-actions { flex-wrap: wrap; gap: 10px 14px; }
+  .group-room-actions > span { width: 100%; text-align: right; }
+  .group-invite-panel { padding: 16px 20px 18px; }
+  .group-invite-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .group-invite-row input { grid-column: 1 / -1; }
 }

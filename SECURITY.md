@@ -1,6 +1,8 @@
 # Security policy
 
-410 is an unaudited open-source MVP for disposable two-person conversations.
+410 is an unaudited open-source MVP for disposable conversations. The existing
+two-person mode and the feature-flagged experimental group mode use separate
+protocol implementations and security models.
 
 It should not be represented as providing absolute security, guaranteed anonymity, endpoint protection, or protection against a malicious peer.
 
@@ -35,6 +37,35 @@ A normal HTTP request does not transmit the fragment to the server.
 The protocol is custom.
 
 It is not a standardized Noise protocol and has not undergone an independent cryptographic audit.
+
+## Experimental group protocol
+
+Group E2EE v1 is disabled by default and intended only for DEV evaluation until
+it receives a separate independent security review.
+
+It uses membership epochs, fresh ephemeral X25519 contributions, directional
+pairwise keys, per-message random content keys, per-recipient key wrapping,
+XChaCha20-Poly1305, replay state, authenticated canonical transcripts, mutual
+key confirmation, and an all-member epoch-digest ready barrier.
+
+The group invite fragment contains a shared admission/authentication secret.
+Possession proves access to the invite secret; it does not establish a stable
+or unique participant identity.
+
+Join secrecy begins when a new epoch is committed: a new member receives no
+keys for prior epochs. Leave secrecy begins only after disconnect grace expires
+and the remaining members commit a new epoch. A former member that still has
+the reusable invite may rejoin as a new live session and receive keys for the
+new epoch.
+
+The relay remains the membership and delivery coordinator. It can delay,
+withhold, reorder, partition, or deny delivery and can misreport physical
+presence. Authenticated key material is intended to prevent a relay without
+the invite secret from silently substituting usable cryptographic keys, but it
+does not make the service available under a malicious relay.
+
+The complete design is documented in
+[docs/group-e2ee-v1.md](docs/group-e2ee-v1.md).
 
 ## What the relay can observe
 
@@ -182,6 +213,20 @@ Before treating 410 as suitable for sensitive or high-risk use, commission an in
 - rate limiting;
 - multi-instance behavior;
 - denial-of-service exposure.
+
+Before enabling group rooms in production, independently review at least:
+
+- the canonical length-prefixed transcript encoding;
+- admission-MAC and server-bound member-ID handling;
+- epoch-digest agreement and ready barrier;
+- deterministic `crypto_kx` role assignment;
+- pairwise key confirmation;
+- content-key wrapping and nonce discipline;
+- join/leave secrecy across concurrent membership changes;
+- stale epoch, replay, and duplicate-sequence handling;
+- JavaScript best-effort key erasure;
+- owner-capability verification;
+- malicious relay and malicious invite-holder behavior.
 
 ## Reporting a vulnerability
 

@@ -17,6 +17,19 @@ export const METRIC_NAMES = [
 export type MetricName = typeof METRIC_NAMES[number];
 export type MetricCounts = Record<MetricName, number>;
 
+export const GROUP_METRIC_NAMES = [
+  "group_rooms_created",
+  "group_participants_joined",
+  "group_conversations_started",
+  "group_messages_relayed",
+  "group_destroyed_manual",
+  "group_destroyed_ttl",
+  "group_responses_410"
+] as const;
+
+export type GroupMetricName = typeof GROUP_METRIC_NAMES[number];
+export type GroupMetricCounts = Record<GroupMetricName, number>;
+
 export const SOURCE_METRIC_NAMES = [
   "homepage_views",
   "rooms_created",
@@ -30,12 +43,16 @@ export type AttributionSource = TrafficSource | "unattributed";
 export type SourceBuckets = Partial<Record<AttributionSource, SourceMetricCounts>>;
 
 interface MetricsDocument {
-  version: 2;
+  version: 3;
   totals: MetricCounts;
   days: Record<string, MetricCounts>;
   sources: {
     totals: SourceBuckets;
     days: Record<string, SourceBuckets>;
+  };
+  groups: {
+    totals: GroupMetricCounts;
+    days: Record<string, GroupMetricCounts>;
   };
 }
 
@@ -52,6 +69,14 @@ export interface MetricsSnapshot {
     today: SourceBuckets;
     totals: SourceBuckets;
   };
+  groups: {
+    now: {
+      rooms: number;
+      participants: number;
+    };
+    today: GroupMetricCounts;
+    totals: GroupMetricCounts;
+  };
 }
 
 export interface MetricsStoreOptions {
@@ -64,8 +89,20 @@ function emptyCounts(): MetricCounts {
   return Object.fromEntries(METRIC_NAMES.map((name) => [name, 0])) as MetricCounts;
 }
 
+function emptyGroupCounts(): GroupMetricCounts {
+  return Object.fromEntries(
+    GROUP_METRIC_NAMES.map((name) => [name, 0])
+  ) as GroupMetricCounts;
+}
+
 function cloneCounts(counts: MetricCounts): MetricCounts {
   return Object.fromEntries(METRIC_NAMES.map((name) => [name, counts[name]])) as MetricCounts;
+}
+
+function cloneGroupCounts(counts: GroupMetricCounts): GroupMetricCounts {
+  return Object.fromEntries(
+    GROUP_METRIC_NAMES.map((name) => [name, counts[name]])
+  ) as GroupMetricCounts;
 }
 
 function emptySourceMetricCounts(): SourceMetricCounts {
@@ -97,11 +134,15 @@ function sourceMetricsFromCounts(counts: MetricCounts): SourceMetricCounts {
 
 function emptyDocument(): MetricsDocument {
   return {
-    version: 2,
+    version: 3,
     totals: emptyCounts(),
     days: {},
     sources: {
       totals: {},
+      days: {}
+    },
+    groups: {
+      totals: emptyGroupCounts(),
       days: {}
     }
   };
@@ -122,6 +163,18 @@ function parseCounts(value: unknown): MetricCounts | null {
   const record = value as Record<string, unknown>;
   const counts = emptyCounts();
   for (const name of METRIC_NAMES) {
+    const count = record[name];
+    if (!Number.isSafeInteger(count) || (count as number) < 0) return null;
+    counts[name] = count as number;
+  }
+  return counts;
+}
+
+function parseGroupCounts(value: unknown): GroupMetricCounts | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const counts = emptyGroupCounts();
+  for (const name of GROUP_METRIC_NAMES) {
     const count = record[name];
     if (!Number.isSafeInteger(count) || (count as number) < 0) return null;
     counts[name] = count as number;
@@ -182,7 +235,7 @@ function parseDocument(value: unknown): MetricsDocument | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
 
-  if (record.version !== 1 && record.version !== 2) return null;
+  if (record.version !== 1 && record.version !== 2 && record.version !== 3) return null;
 
   const totals = parseCounts(record.totals);
   if (!totals || !record.days || typeof record.days !== "object" || Array.isArray(record.days)) return null;
@@ -205,7 +258,7 @@ function parseDocument(value: unknown): MetricsDocument | null {
     }
 
     return {
-      version: 2,
+      version: 3,
       totals,
       days,
       sources: {
@@ -213,6 +266,10 @@ function parseDocument(value: unknown): MetricsDocument | null {
           unattributed: sourceMetricsFromCounts(totals)
         },
         days: sourceDays
+      },
+      groups: {
+        totals: emptyGroupCounts(),
+        days: {}
       }
     };
   }
@@ -225,13 +282,35 @@ function parseDocument(value: unknown): MetricsDocument | null {
 
   if (!sourceTotals || !sourceDays) return null;
 
+  let groupTotals = emptyGroupCounts();
+  const groupDays: Record<string, GroupMetricCounts> = {};
+
+  if (record.version === 3) {
+    if (!record.groups || typeof record.groups !== "object" || Array.isArray(record.groups)) return null;
+    const groupRecord = record.groups as Record<string, unknown>;
+    const parsedTotals = parseGroupCounts(groupRecord.totals);
+    if (!parsedTotals || !groupRecord.days || typeof groupRecord.days !== "object" || Array.isArray(groupRecord.days)) {
+      return null;
+    }
+    groupTotals = parsedTotals;
+    for (const [day, rawCounts] of Object.entries(groupRecord.days as Record<string, unknown>)) {
+      const counts = parseGroupCounts(rawCounts);
+      if (!isUtcDay(day) || !counts) return null;
+      groupDays[day] = counts;
+    }
+  }
+
   return {
-    version: 2,
+    version: 3,
     totals,
     days,
     sources: {
       totals: sourceTotals,
       days: sourceDays
+    },
+    groups: {
+      totals: groupTotals,
+      days: groupDays
     }
   };
 }
@@ -272,7 +351,7 @@ export class MetricsStore {
         decoded &&
         typeof decoded === "object" &&
         !Array.isArray(decoded) &&
-        (decoded as Record<string, unknown>).version === 1
+        (decoded as Record<string, unknown>).version !== 3
       ) {
         this.dirty = true;
         await this.flush();
@@ -340,7 +419,24 @@ export class MetricsStore {
     this.scheduleFlush();
   }
 
-  snapshot(nowCounts: { waiting: number; active: number }, timestamp = this.now()): MetricsSnapshot {
+  incrementGroup(name: GroupMetricName, timestamp = this.now()): void {
+    const day = utcDay(timestamp);
+    const daily = this.data.groups.days[day] ??
+      (this.data.groups.days[day] = emptyGroupCounts());
+    this.data.groups.totals[name] = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      this.data.groups.totals[name] + 1
+    );
+    daily[name] = Math.min(Number.MAX_SAFE_INTEGER, daily[name] + 1);
+    this.dirty = true;
+    this.scheduleFlush();
+  }
+
+  snapshot(
+    nowCounts: { waiting: number; active: number },
+    timestamp = this.now(),
+    groupNow: { rooms: number; participants: number } = { rooms: 0, participants: 0 }
+  ): MetricsSnapshot {
     return {
       startedAt: new Date(this.startedAtMs).toISOString(),
       uptimeSeconds: Math.max(0, Math.floor((timestamp - this.startedAtMs) / 1000)),
@@ -350,6 +446,14 @@ export class MetricsStore {
       sources: {
         today: cloneSourceBuckets(this.data.sources.days[utcDay(timestamp)] ?? {}),
         totals: cloneSourceBuckets(this.data.sources.totals)
+      },
+      groups: {
+        now: {
+          rooms: Math.max(0, groupNow.rooms),
+          participants: Math.max(0, groupNow.participants)
+        },
+        today: cloneGroupCounts(this.data.groups.days[utcDay(timestamp)] ?? emptyGroupCounts()),
+        totals: cloneGroupCounts(this.data.groups.totals)
       }
     };
   }

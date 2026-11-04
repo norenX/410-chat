@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClientCommand, Role, ServerEvent } from "../../shared/protocol.js";
 import { CryptoSession, createLinkSecret, sodiumReady, type DecryptedMessage } from "./crypto-session";
+import { GroupRoomApp, storeCreatedGroup } from "./GroupRoomApp";
 import { QrInviteDialog } from "./QrInviteDialog";
 
 type View = "loading" | "landing" | "security" | "creating" | "connecting" | "waiting" | "handshaking" | "active" | "reconnecting";
@@ -24,7 +25,29 @@ interface ChatMessage extends DecryptedMessage {
 const SESSION_KEY = "410.session.v1";
 const LEGACY_SESSION_KEY = "burnroom.session.v1";
 const INVITE_PATH = /^\/r\/([A-Za-z0-9_-]{43})$/;
+const GROUP_INVITE_PATH = /^\/g\/[A-Za-z0-9_-]{43}$/;
 const AUTO_SCROLL_THRESHOLD = 80;
+const MAX_DATE_MS = 8_640_000_000_000_000;
+
+function safeMessageTime(sentAt: number): { dateTime?: string; label: string } {
+  if (!Number.isSafeInteger(sentAt) || sentAt < 0 || sentAt > MAX_DATE_MS) {
+    return { label: "Time unavailable" };
+  }
+  try {
+    const date = new Date(sentAt);
+    return {
+      dateTime: date.toISOString(),
+      label: date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    };
+  } catch {
+    return { label: "Time unavailable" };
+  }
+}
+
+function SafeMessageTime({ sentAt }: { sentAt: number }) {
+  const formatted = safeMessageTime(sentAt);
+  return <time dateTime={formatted.dateTime}>{formatted.label}</time>;
+}
 
 function readLocalSession(): LocalSession | null {
   try {
@@ -58,6 +81,26 @@ function randomMessageId(): string {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
+function decodeBase64Url(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+}
+
+function encodeBase64Url(value: Uint8Array): string {
+  let binary = "";
+  for (const byte of value) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function ownerVerifier(ownerCapability: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    decodeBase64Url(ownerCapability) as BufferSource
+  );
+  return encodeBase64Url(new Uint8Array(digest));
+}
+
 async function copyText(value: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
@@ -84,6 +127,11 @@ async function copyText(value: string): Promise<boolean> {
 }
 
 export function App() {
+  if (GROUP_INVITE_PATH.test(window.location.pathname)) return <GroupRoomApp />;
+  return <DirectChatApp />;
+}
+
+function DirectChatApp() {
   const [view, setView] = useState<View>("loading");
   const [inviteUrl, setInviteUrl] = useState("");
   const [copyState, setCopyState] = useState<CopyState>("manual");
@@ -98,6 +146,7 @@ export function App() {
   const [destroying, setDestroying] = useState(false);
   const [infoPanel, setInfoPanel] = useState<InfoPanel>(null);
   const [qrOpen, setQrOpen] = useState(false);
+  const [groupRoomsEnabled, setGroupRoomsEnabled] = useState(false);
 
   const socketRef = useRef<WebSocket | undefined>(undefined);
   const cryptoRef = useRef<CryptoSession | undefined>(undefined);
@@ -325,6 +374,18 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (window.location.pathname !== "/") return;
+    let active = true;
+    void fetch("/api/features", { headers: { Accept: "application/json" } })
+      .then(async (response) => response.ok ? response.json() as Promise<{ groupRooms?: unknown }> : null)
+      .then((features) => {
+        if (active) setGroupRoomsEnabled(features?.groupRooms === true);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       if (expiresAt) setRemaining(expiresAt - Date.now());
     }, 250);
@@ -457,6 +518,45 @@ export function App() {
     }
   }
 
+  async function startGroupRoom(): Promise<void> {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setView("creating");
+    setNotice("");
+    try {
+      await sodiumReady();
+      const linkSecret = createLinkSecret();
+      const ownerCapability = createLinkSecret();
+      const response = await fetch("/api/group-rooms", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-410-Source": currentTrafficSource()
+        },
+        body: JSON.stringify({ ownerVerifier: await ownerVerifier(ownerCapability) })
+      });
+      if (response.status === 429) {
+        setNotice("Too many rooms were created from this connection. Please try again later.");
+        setView("landing");
+        creatingRef.current = false;
+        return;
+      }
+      if (!response.ok) throw new Error("group creation failed");
+      const created = await response.json() as {
+        roomId: string;
+        inviteToken: string;
+        expiresAt: number;
+      };
+      storeCreatedGroup({ ...created, linkSecret, ownerCapability });
+      const url = `/g/${encodeURIComponent(created.inviteToken)}#secret=${encodeURIComponent(linkSecret)}`;
+      window.location.assign(url);
+    } catch {
+      creatingRef.current = false;
+      setNotice("The room could not be created. Please try again.");
+      setView("landing");
+    }
+  }
+
   function sendMessage(): void {
     const text = draft.trim();
     if (!text || text.length > 2000 || view !== "active" || !peerConnected) return;
@@ -508,7 +608,18 @@ export function App() {
             <span>Gone.</span>
           </h1>
           <p className="intro start-intro">A private conversation that exists once.<br />No account. No history.</p>
-          <button className="primary-action" type="button" onClick={startConversation}>Start</button>
+          <div className="start-actions">
+            <div className="start-action">
+              <button className="primary-action" type="button" onClick={startConversation} aria-describedby="direct-action-description">Start</button>
+              <p id="direct-action-description">1-to-1 private chat</p>
+            </div>
+            {groupRoomsEnabled && (
+              <div className="start-action">
+                <button className="secondary-action" type="button" onClick={startGroupRoom} aria-describedby="group-action-description">Create a room</button>
+                <p id="group-action-description">Temporary room for a group</p>
+              </div>
+            )}
+          </div>
           {notice && <p className="error-text" role="status">{notice}</p>}
           <p className="start-technical">E2E encrypted · 2 people · 30 minutes</p>
           <SecurityLink onOpen={() => setInfoPanel("security")} />
@@ -582,9 +693,7 @@ export function App() {
         {messages.map((message, index) => (
           <article key={message.id} className={`message ${message.side}`} data-last-message={index === messages.length - 1 ? "true" : undefined}>
             <p>{message.text}</p>
-            <time dateTime={new Date(message.sentAt).toISOString()}>
-              {new Date(message.sentAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-            </time>
+            <SafeMessageTime sentAt={message.sentAt} />
           </article>
         ))}
       </section>
@@ -646,11 +755,11 @@ function SecurityPage() {
         </header>
 
         <h1>Security</h1>
-        <p className="security-introduction">410 is designed for one-time conversations between two browsers.</p>
+        <p className="security-introduction">410 is designed for temporary conversations between browsers.</p>
 
         <section aria-labelledby="security-messages">
           <h2 id="security-messages">Messages</h2>
-          <p>Messages are end-to-end encrypted in the browsers before they are relayed.</p>
+          <p>Messages in 1-to-1 conversations and temporary rooms are end-to-end encrypted in the browsers before they are relayed.</p>
           <p>The server does not receive message plaintext or the session encryption keys.</p>
         </section>
 
@@ -668,11 +777,20 @@ function SecurityPage() {
 
         <section aria-labelledby="security-lifetime">
           <h2 id="security-lifetime">Lifetime</h2>
-          <p>A conversation has exactly two participants.</p>
+          <p>A 1-to-1 conversation has exactly two participants.</p>
           <p>An unused invite expires after 30 minutes.</p>
           <p>Once the second participant joins, the conversation can exist for up to 30 minutes.</p>
           <p>A consumed invite cannot be reused by another participant.</p>
           <p>If a participant disconnects, the conversation allows the existing reconnect grace period before it is destroyed.</p>
+        </section>
+
+        <section aria-labelledby="security-rooms">
+          <h2 id="security-rooms">Temporary rooms (experimental)</h2>
+          <p>A room allows up to 10 people to be present at once and expires 24 hours after it is created.</p>
+          <p>Its invite can be reused while the room exists. Only the creator capability can destroy it early.</p>
+          <p>Room messages are not stored or replayed. A browser sees only messages sent while it is connected to the current live session.</p>
+          <p>The encryption context changes when the active room membership changes.</p>
+          <p>Group E2EE v1 is experimental, available only when explicitly enabled, and has not undergone an independent security review.</p>
         </section>
 
         <section aria-labelledby="security-destruction">
@@ -725,8 +843,8 @@ function InfoDialog({ panel, onClose }: { panel: InfoPanel; onClose: () => void 
       <section className="info-dialog" role="dialog" aria-modal="true" aria-labelledby="info-title">
         <h2 id="info-title">{panel === "how" ? "How it works" : "Security"}</h2>
         <p>{panel === "how"
-          ? "One link admits one other browser. The link is consumed when they enter. When the session ends, its in-memory room state is removed."
-          : <>Messages are encrypted in the browsers before being relayed.<br />The server does not receive message plaintext.<br />Your peer can still copy or record what they see.</>}</p>
+          ? "A 1-to-1 link admits one other browser and is consumed when they enter. A temporary room link can admit up to 10 people while the room exists. Neither mode keeps server-side message history."
+          : <>Messages in 1-to-1 conversations and temporary rooms are encrypted in the browsers before being relayed.<br />The server does not receive message plaintext.<br />Other participants can still copy or record what they see.</>}</p>
         <div className="info-dialog-actions">
           {panel === "security" && <a href="/security">Details →</a>}
           <button type="button" onClick={onClose}>Close</button>

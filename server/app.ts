@@ -8,16 +8,23 @@ import { MetricsStore, type MetricName } from "./metrics.js";
 import { normalizeTrafficSource, trafficSourceFromPageRequest } from "./attribution.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import { RoomManager, type DestructionReason, type RoomManagerHooks } from "./room-manager.js";
+import {
+  GroupRoomManager,
+  type GroupDestructionReason,
+  type GroupRoomManagerHooks
+} from "./group-room-manager.js";
 
 export interface ChatServerOptions {
   config: ChatConfig;
   devAssets?: boolean;
   hooks?: RoomManagerHooks;
+  groupHooks?: GroupRoomManagerHooks;
   metrics?: MetricsStore;
 }
 
 export interface ChatServer {
   manager: RoomManager;
+  groupManager: GroupRoomManager;
   metrics: MetricsStore;
   listen(): Promise<{ host: string; port: number; url: string }>;
   close(): Promise<void>;
@@ -35,6 +42,7 @@ const MIME: Record<string, string> = {
 };
 
 const INVITE_PATH = /^\/r\/([A-Za-z0-9_-]{43})$/;
+const GROUP_INVITE_PATH = /^\/g\/([A-Za-z0-9_-]{43})$/;
 const GONE_HTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -122,6 +130,28 @@ async function drainSmallBody(request: IncomingMessage, maxBytes = 1024): Promis
   return true;
 }
 
+async function readSmallJson(
+  request: IncomingMessage,
+  maxBytes = 1024
+): Promise<{ value?: Record<string, unknown>; tooLarge: boolean }> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.byteLength;
+    if (size > maxBytes) return { tooLarge: true };
+    chunks.push(buffer);
+  }
+  try {
+    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { value: parsed as Record<string, unknown>, tooLarge: false }
+      : { tooLarge: false };
+  } catch {
+    return { tooLarge: false };
+  }
+}
+
 export async function createChatServer(options: ChatServerOptions): Promise<ChatServer> {
   const { config } = options;
   const metrics = options.metrics ?? new MetricsStore(config.metricsFile);
@@ -153,6 +183,54 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
       externalHooks?.onDestroyed?.(reason);
     }
   });
+  const externalGroupHooks = options.groupHooks;
+  const groupDestructionMetric: Partial<Record<GroupDestructionReason, "group_destroyed_manual" | "group_destroyed_ttl">> = {
+    manual: "group_destroyed_manual",
+    ttl: "group_destroyed_ttl"
+  };
+  const groupManager = new GroupRoomManager({
+    hardTtlMs: config.groupHardTtlMs,
+    rekeyTimeoutMs: config.groupRekeyTimeoutMs,
+    disconnectGraceMs: config.disconnectGraceMs,
+    heartbeatEveryMs: config.heartbeatEveryMs,
+    heartbeatStaleMs: config.heartbeatStaleMs,
+    authTimeoutMs: config.authTimeoutMs,
+    maxWsMessageBytes: config.maxGroupWsMessageBytes,
+    maxRelayChars: config.maxGroupRelayChars,
+    maxRelaysPerWindow: config.maxRelaysPerWindow,
+    maxRoomRelaysPerWindow: config.maxGroupRelaysPerWindow,
+    relayWindowMs: config.groupRelayWindowMs,
+    maxInboundFramesPerWindow: config.maxGroupInboundFramesPerWindow,
+    maxInboundBytesPerWindow: config.maxGroupInboundBytesPerWindow,
+    inboundWindowMs: config.groupInboundWindowMs,
+    maxBufferedAmount: config.maxGroupBufferedAmount,
+    maxParticipants: 10,
+    maxRooms: config.maxGroupRooms,
+    maxEmptyRooms: config.maxGroupEmptyRooms
+  }, {
+    onRoomCreated: (source) => {
+      metrics.incrementGroup("group_rooms_created");
+      externalGroupHooks?.onRoomCreated?.(source);
+    },
+    onParticipantJoined: (source) => {
+      metrics.incrementGroup("group_participants_joined");
+      externalGroupHooks?.onParticipantJoined?.(source);
+    },
+    onConversationStarted: (source) => {
+      metrics.incrementGroup("group_conversations_started");
+      externalGroupHooks?.onConversationStarted?.(source);
+    },
+    onMessageRelayed: (source) => {
+      metrics.incrementGroup("group_messages_relayed");
+      externalGroupHooks?.onMessageRelayed?.(source);
+    },
+    onDestroyed: (reason) => {
+      const name = groupDestructionMetric[reason];
+      if (name) metrics.incrementGroup(name);
+      externalGroupHooks?.onDestroyed?.(reason);
+    },
+    onEpochChanged: externalGroupHooks?.onEpochChanged
+  });
   const createLimiter = new SlidingWindowLimiter(config.maxCreatesPerWindow, config.createWindowMs);
   const connectionLimiter = new SlidingWindowLimiter(config.maxConnectionsPerWindow, config.connectionWindowMs);
   const distRoot = join(process.cwd(), "dist-client");
@@ -174,8 +252,18 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/features") {
+      json(response, 200, { groupRooms: config.groupRoomsEnabled });
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/__stats") {
-      json(response, 200, metrics.snapshot(manager.currentCounts()));
+      const groupCounts = groupManager.currentCounts();
+      json(response, 200, metrics.snapshot(
+        manager.currentCounts(),
+        Date.now(),
+        { rooms: groupCounts.rooms, participants: groupCounts.participants }
+      ));
       return;
     }
 
@@ -198,19 +286,69 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/group-rooms" && config.groupRoomsEnabled) {
+      if (!originAllowed(request, config.allowedOrigins)) {
+        json(response, 403, { error: "request_rejected" });
+        return;
+      }
+      if (!createLimiter.take(clientIp(request, config.trustProxy))) {
+        response.setHeader("Retry-After", String(Math.ceil(config.createWindowMs / 1000)));
+        json(response, 429, { error: "rate_limited" });
+        return;
+      }
+      let parsed: Awaited<ReturnType<typeof readSmallJson>>;
+      try {
+        parsed = await readSmallJson(request);
+      } catch {
+        json(response, 400, { error: "invalid_request" });
+        return;
+      }
+      if (parsed.tooLarge) {
+        json(response, 413, { error: "request_too_large" });
+        return;
+      }
+      const ownerVerifier = parsed.value?.ownerVerifier;
+      if (typeof ownerVerifier !== "string") {
+        json(response, 400, { error: "invalid_request" });
+        return;
+      }
+      try {
+        const source = normalizeTrafficSource(request.headers["x-410-source"]);
+        const created = groupManager.createRoom(ownerVerifier, Date.now(), source);
+        if (!created) {
+          json(response, 503, { error: "capacity_reached" });
+          return;
+        }
+        json(response, 201, created);
+      } catch {
+        json(response, 400, { error: "invalid_request" });
+      }
+      return;
+    }
+
     if (url.pathname.startsWith("/api/")) {
       json(response, 404, { error: "not_found" });
       return;
     }
 
     const inviteMatch = url.pathname.match(INVITE_PATH);
+    const groupInviteMatch = url.pathname.match(GROUP_INVITE_PATH);
     const isRoomPath = url.pathname === "/r" || url.pathname.startsWith("/r/");
+    const isGroupRoomPath = url.pathname === "/g" || url.pathname.startsWith("/g/");
     const isDocumentRequest = request.method === "GET" || request.method === "HEAD";
     if (isDocumentRequest && isRoomPath && (!inviteMatch || !manager.hasActiveInvite(inviteMatch[1]))) {
       gone(response, request.method === "HEAD", () => metrics.increment("responses_410"));
       return;
     }
-    const servesApp = url.pathname === "/" || url.pathname === "/security" || Boolean(inviteMatch);
+    if (
+      isDocumentRequest && isGroupRoomPath &&
+      (!config.groupRoomsEnabled || !groupInviteMatch || !groupManager.hasActiveInvite(groupInviteMatch[1]))
+    ) {
+      gone(response, request.method === "HEAD", () => metrics.incrementGroup("group_responses_410"));
+      return;
+    }
+    const servesApp = url.pathname === "/" || url.pathname === "/security" ||
+      Boolean(inviteMatch) || Boolean(groupInviteMatch);
 
     if (vite) {
       if (!servesApp && !isDevAsset(url.pathname)) {
@@ -268,15 +406,27 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
 
   const sockets = new WebSocketServer({ noServer: true, maxPayload: config.maxWsMessageBytes, perMessageDeflate: false });
   sockets.on("connection", (socket) => manager.acceptSocket(socket));
+  const groupSockets = new WebSocketServer({
+    noServer: true,
+    maxPayload: config.maxGroupWsMessageBytes,
+    perMessageDeflate: false
+  });
+  groupSockets.on("connection", (socket) => groupManager.acceptSocket(socket));
   server.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
-    if (url.pathname !== "/ws") return;
+    if (url.pathname !== "/ws" && url.pathname !== "/group-ws") return;
+    if (url.pathname === "/group-ws" && !config.groupRoomsEnabled) {
+      socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
     if (!originAllowed(request, config.allowedOrigins) || !connectionLimiter.take(clientIp(request, config.trustProxy))) {
       socket.write("HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n");
       socket.destroy();
       return;
     }
-    sockets.handleUpgrade(request, socket, head, (webSocket) => sockets.emit("connection", webSocket, request));
+    const target = url.pathname === "/group-ws" ? groupSockets : sockets;
+    target.handleUpgrade(request, socket, head, (webSocket) => target.emit("connection", webSocket, request));
   });
 
   const pruneTimer = setInterval(() => {
@@ -287,6 +437,7 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
 
   return {
     manager,
+    groupManager,
     metrics,
     listen: () => new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -301,8 +452,11 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
       try {
         clearInterval(pruneTimer);
         manager.shutdown();
+        groupManager.shutdown();
         for (const socket of sockets.clients) socket.terminate();
+        for (const socket of groupSockets.clients) socket.terminate();
         await new Promise<void>((resolve) => sockets.close(() => resolve()));
+        await new Promise<void>((resolve) => groupSockets.close(() => resolve()));
         await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
         await vite?.close();
       } finally {
