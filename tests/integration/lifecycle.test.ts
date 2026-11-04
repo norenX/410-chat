@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createChatServer, type ChatServer } from "../../server/app.js";
 import { configFromEnv } from "../../server/config.js";
-import { METRIC_NAMES, type MetricsSnapshot } from "../../server/metrics.js";
+import { GROUP_METRIC_NAMES, METRIC_NAMES, type MetricsSnapshot } from "../../server/metrics.js";
 import { createLinkSecret, sodiumReady } from "../../client/src/crypto-session.js";
 import { WsClient, waitUntil } from "../helpers.js";
 
@@ -91,6 +91,12 @@ describe("410 lifecycle", () => {
     expect(invalidRoom.headers.get("cache-control")).toBe("no-store");
     expect(invalidRoom.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     expect(await invalidRoom.text()).toContain("This conversation no longer exists.");
+    const afterDirectGone = (await getStats(httpUrl)).stats;
+    expect(afterDirectGone.totals.responses_410).toBe(1);
+    expect(afterDirectGone.groups.totals.group_responses_410).toBe(0);
+    expect(afterDirectGone.groups.totals).toEqual(
+      Object.fromEntries(GROUP_METRIC_NAMES.map((name) => [name, 0]))
+    );
 
     const unknown = await fetch(`${httpUrl}/foobar`);
     expect(unknown.status).toBe(404);

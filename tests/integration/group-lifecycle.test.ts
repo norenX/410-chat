@@ -11,7 +11,7 @@ import {
 } from "../../client/src/group-crypto-session.js";
 import { createChatServer, type ChatServer } from "../../server/app.js";
 import { configFromEnv } from "../../server/config.js";
-import type { MetricsSnapshot } from "../../server/metrics.js";
+import { GROUP_METRIC_NAMES, type MetricsSnapshot } from "../../server/metrics.js";
 import type { GroupClientCommand, GroupServerEvent } from "../../shared/group-protocol.js";
 import { waitUntil } from "../helpers.js";
 
@@ -22,11 +22,39 @@ function token(): string {
   return randomBytes(32).toString("base64url");
 }
 
-function ownerCredentials(): { capability: string; verifier: string } {
+type GroupJoinInput = {
+  type: "group_join";
+  inviteToken: string;
+  browserVerifier?: string;
+  tabVerifier?: string;
+  ownerCapability?: string;
+  ownerRecoverySecret?: string;
+};
+
+type GroupAuthInput = GroupJoinInput | Extract<GroupClientCommand, { type: "group_resume" }>;
+
+function normalizedAuth(auth: GroupAuthInput): Extract<GroupClientCommand, { type: "group_join" | "group_resume" }> {
+  if (auth.type === "group_resume") return auth;
+  return {
+    ...auth,
+    browserVerifier: auth.browserVerifier || token(),
+    tabVerifier: auth.tabVerifier || token()
+  };
+}
+
+function ownerCredentials(): {
+  capability: string;
+  verifier: string;
+  recoverySecret: string;
+  recoveryVerifier: string;
+} {
   const capability = token();
+  const recoverySecret = token();
   return {
     capability,
-    verifier: createHash("sha256").update(Buffer.from(capability, "base64url")).digest("base64url")
+    verifier: createHash("sha256").update(Buffer.from(capability, "base64url")).digest("base64url"),
+    recoverySecret,
+    recoveryVerifier: createHash("sha256").update(Buffer.from(recoverySecret, "base64url")).digest("base64url")
   };
 }
 
@@ -60,11 +88,11 @@ async function start(overrides: Partial<ReturnType<typeof configFromEnv>> = {}) 
   };
 }
 
-async function createGroup(httpUrl: string, verifier: string) {
+async function createGroup(httpUrl: string, verifier: string, recoveryVerifier: string) {
   const response = await fetch(`${httpUrl}/api/group-rooms`, {
     method: "POST",
     headers: { "content-type": "application/json", origin: httpUrl },
-    body: JSON.stringify({ ownerVerifier: verifier })
+    body: JSON.stringify({ ownerVerifier: verifier, ownerRecoveryVerifier: recoveryVerifier })
   });
   expect(response.status).toBe(201);
   return response.json() as Promise<{ roomId: string; inviteToken: string; expiresAt: number }>;
@@ -111,14 +139,14 @@ class RawGroupClient {
     socket.on("message", (raw) => this.events.push(JSON.parse(raw.toString()) as GroupServerEvent));
   }
 
-  static async connect(wsUrl: string, auth: GroupClientCommand): Promise<RawGroupClient> {
+  static async connect(wsUrl: string, auth: GroupAuthInput): Promise<RawGroupClient> {
     const socket = new WebSocket(wsUrl, { origin: wsUrl.replace(/^ws/, "http").replace(/\/group-ws$/, "") });
     const client = new RawGroupClient(socket);
     await new Promise<void>((resolve, reject) => {
       socket.once("open", resolve);
       socket.once("error", reject);
     });
-    socket.send(JSON.stringify(auth));
+    socket.send(JSON.stringify(normalizedAuth(auth)));
     return client;
   }
 
@@ -159,7 +187,7 @@ class SecureGroupClient {
 
   static async connect(
     wsUrl: string,
-    auth: Extract<GroupClientCommand, { type: "group_join" | "group_resume" }>,
+    auth: GroupAuthInput,
     linkSecret: string,
     options: {
       poisonReadyOnce?: boolean;
@@ -173,7 +201,7 @@ class SecureGroupClient {
       socket.once("open", resolve);
       socket.once("error", reject);
     });
-    socket.send(JSON.stringify(auth));
+    socket.send(JSON.stringify(normalizedAuth(auth)));
     return client;
   }
 
@@ -276,11 +304,15 @@ describe("experimental group room lifecycle", () => {
     await groupSodiumReady();
     const { server, httpUrl, wsUrl } = await start();
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
     const linkSecret = token();
     expect(created.roomId).not.toBe(created.inviteToken);
     expect(created.expiresAt).toBeGreaterThan(Date.now());
     expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(200);
+    const createdStats = await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot;
+    expect(createdStats.groups.now).toEqual({ rooms: 1, participants: 0 });
+    expect(createdStats.groups.totals.group_rooms_created).toBe(1);
+    expect(createdStats.groups.totals.group_participants_joined).toBe(0);
 
     const a = await SecureGroupClient.connect(wsUrl, {
       type: "group_join",
@@ -324,6 +356,8 @@ describe("experimental group room lifecycle", () => {
     await waitUntil(() => a.activeEpoch === 4 && b.activeEpoch === 4 && resumedC.activeEpoch === 4);
     expect(resumedC.session?.memberId).toBe(cSession.memberId);
     expect(resumedC.messages).toEqual([]);
+    expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
+      .groups.totals.group_participants_joined).toBe(3);
     b.sendMessage("after-resume", "fresh epoch");
     await waitUntil(() => a.messages.length === 1 && resumedC.messages.length === 1);
 
@@ -363,6 +397,7 @@ describe("experimental group room lifecycle", () => {
       group_responses_410: 1
     });
     expect(stats.groups.now).toEqual({ rooms: 0, participants: 0 });
+    expect(stats.totals.responses_410).toBe(0);
     const serialized = JSON.stringify(stats);
     expect(serialized).not.toContain(created.roomId);
     expect(serialized).not.toContain(created.inviteToken);
@@ -373,14 +408,16 @@ describe("experimental group room lifecycle", () => {
       resumeTokens: 0,
       participants: 0,
       connectedSockets: 0,
-      storedMessages: 0
+      storedMessages: 0,
+      personaMappings: 0,
+      usedPersonas: 0
     });
   });
 
   it("reserves grace slots, survives owner disconnect, rejects spoofed control, and caps membership at ten", async () => {
     const { server, httpUrl, wsUrl } = await start({ groupRekeyTimeoutMs: 60_000, disconnectGraceMs: 120 });
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
     const clients: RawGroupClient[] = [];
     const sessions: Array<Extract<GroupServerEvent, { type: "group_session" }>> = [];
     for (let index = 0; index < 10; index += 1) {
@@ -393,9 +430,17 @@ describe("experimental group room lifecycle", () => {
       sessions.push(await client.events.waitFor("group_session"));
     }
     expect(server.groupManager.stats().participants).toBe(10);
+    expect(new Set(sessions.map((session) => session.persona.nickname)).size).toBe(10);
+    expect(new Set(sessions.map((session) => session.persona.color)).size).toBe(10);
+    expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot).groups).toMatchObject({
+      now: { rooms: 1, participants: 10 },
+      totals: { group_participants_joined: 10 }
+    });
 
     const eleventh = await RawGroupClient.connect(wsUrl, { type: "group_join", inviteToken: created.inviteToken });
     expect((await eleventh.events.waitFor("group_room_full")).maxParticipants).toBe(10);
+    expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
+      .groups.totals.group_participants_joined).toBe(10);
     expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(200);
 
     const sender = clients[1]!;
@@ -430,31 +475,278 @@ describe("experimental group room lifecycle", () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
     expect(server.groupManager.stats().activeRooms).toBe(1);
     expect(server.groupManager.stats().participants).toBe(10);
+    expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
+      .groups.now.participants).toBe(10);
     await waitUntil(() => server.groupManager.stats().participants === 9, 1_000);
     expect(server.groupManager.stats().activeRooms).toBe(1);
+    expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
+      .groups.now.participants).toBe(9);
     expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(200);
     for (const client of clients.slice(1)) client.close();
   });
 
-  it("uses an absolute creation TTL and cleans all room references", async () => {
-    const { server, httpUrl } = await start({ groupHardTtlMs: 120 });
+  it("assigns room-scoped personas and enforces three live sessions per browser", async () => {
+    const { server, httpUrl, wsUrl } = await start({ groupRekeyTimeoutMs: 60_000, disconnectGraceMs: 100 });
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
+    const browserVerifier = token();
+    const firstTabVerifier = token();
+
+    const primary = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: firstTabVerifier,
+      ownerCapability: owner.capability,
+      ownerRecoverySecret: owner.recoverySecret
+    });
+    const primarySession = await primary.events.waitFor("group_session");
+    expect(primarySession.personaKind).toBe("primary");
+
+    const reloadedPrimary = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: firstTabVerifier,
+      ownerCapability: owner.capability
+    });
+    const reloadedSession = await reloadedPrimary.events.waitFor("group_session");
+    expect(reloadedSession.memberId).not.toBe(primarySession.memberId);
+    expect(reloadedSession.persona).toEqual(primarySession.persona);
+    expect(reloadedSession.personaKind).toBe("primary");
+    expect(server.groupManager.stats().participants).toBe(1);
+    expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
+      .groups.totals.group_participants_joined).toBe(2);
+
+    const secondary = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: token()
+    });
+    const secondarySession = await secondary.events.waitFor("group_session");
+    secondary.send({ type: "group_destroy", ownerCapability: browserVerifier });
+    await secondary.events.waitFor("group_forbidden");
     expect(server.groupManager.stats().activeRooms).toBe(1);
+    const third = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: token()
+    });
+    const thirdSession = await third.events.waitFor("group_session");
+    expect(secondarySession.personaKind).toBe("ephemeral");
+    expect(thirdSession.personaKind).toBe("ephemeral");
+
+    const fourth = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: token()
+    });
+    expect((await fourth.events.waitFor("group_browser_limit")).maxSessions).toBe(3);
+    expect(server.groupManager.stats().participants).toBe(3);
+    expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
+      .groups.totals.group_participants_joined).toBe(4);
+
+    const otherBrowser = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken
+    });
+    const otherSession = await otherBrowser.events.waitFor("group_session");
+    const initialPersonas = [reloadedSession, secondarySession, thirdSession, otherSession].map((session) => session.persona);
+    expect(new Set(initialPersonas.map((persona) => persona.nickname)).size).toBe(4);
+    expect(new Set(initialPersonas.map((persona) => persona.color)).size).toBe(4);
+
+    reloadedPrimary.close();
+    await waitUntil(() => server.groupManager.currentCounts().connected === 3);
+    const returnedPrimary = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: token(),
+      ownerCapability: owner.capability
+    });
+    const returnedSession = await returnedPrimary.events.waitFor("group_session");
+    expect(returnedSession.memberId).not.toBe(reloadedSession.memberId);
+    expect(returnedSession.personaKind).toBe("primary");
+    expect(returnedSession.persona).toEqual(reloadedSession.persona);
+    expect(returnedSession.resumeToken).not.toBe(reloadedSession.resumeToken);
+
+    secondary.close();
+    await waitUntil(() => server.groupManager.stats().participants === 3, 1_000);
+    const replacementEphemeral = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: token()
+    });
+    const replacementSession = await replacementEphemeral.events.waitFor("group_session");
+    expect(replacementSession.personaKind).toBe("ephemeral");
+    expect(replacementSession.persona.nickname).not.toBe(secondarySession.persona.nickname);
+
+    expect(server.groupManager.stats()).toMatchObject({
+      participants: 4,
+      personaMappings: 2,
+      usedPersonas: 5,
+      storedMessages: 0
+    });
+    expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
+      .groups.totals.group_participants_joined).toBe(7);
+    expect(JSON.stringify(server.groupManager.stats())).not.toContain(browserVerifier);
+    returnedPrimary.send({ type: "group_destroy", ownerCapability: owner.capability });
+    await returnedPrimary.events.waitFor("group_destroyed");
+    expect(server.groupManager.stats()).toMatchObject({
+      activeRooms: 0,
+      participants: 0,
+      personaMappings: 0,
+      usedPersonas: 0,
+      storedMessages: 0
+    });
+  });
+
+  it("recovers fresh owner authority only for the creator primary browser profile", async () => {
+    const { server, httpUrl, wsUrl } = await start({ groupRekeyTimeoutMs: 60_000, disconnectGraceMs: 80 });
+    const owner = ownerCredentials();
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
+    const creatorBrowserVerifier = token();
+
+    const primary = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier: creatorBrowserVerifier,
+      tabVerifier: token(),
+      ownerCapability: owner.capability,
+      ownerRecoverySecret: owner.recoverySecret
+    });
+    const primarySession = await primary.events.waitFor("group_session");
+    expect(primarySession.ownerAuthorized).toBe(true);
+    expect(primarySession.ownerCapability).toBeUndefined();
+
+    const secondTab = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier: creatorBrowserVerifier,
+      tabVerifier: token(),
+      ownerRecoverySecret: owner.recoverySecret
+    });
+    const secondSession = await secondTab.events.waitFor("group_session");
+    expect(secondSession.personaKind).toBe("ephemeral");
+    expect(secondSession.ownerAuthorized).toBe(false);
+    expect(secondSession.ownerCapability).toBeUndefined();
+
+    const thirdTab = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier: creatorBrowserVerifier,
+      tabVerifier: token(),
+      ownerRecoverySecret: owner.recoverySecret
+    });
+    const thirdSession = await thirdTab.events.waitFor("group_session");
+    expect(thirdSession.personaKind).toBe("ephemeral");
+    expect(thirdSession.ownerAuthorized).toBe(false);
+
+    const otherProfile = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier: token(),
+      tabVerifier: token(),
+      ownerRecoverySecret: owner.recoverySecret
+    });
+    const otherSession = await otherProfile.events.waitFor("group_session");
+    expect(otherSession.personaKind).toBe("primary");
+    expect(otherSession.ownerAuthorized).toBe(false);
+    expect(otherSession.ownerCapability).toBeUndefined();
+
+    primary.close();
+    await waitUntil(() => server.groupManager.stats().participants === 3, 1_000);
+
+    const browserTokenOnly = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier: creatorBrowserVerifier,
+      tabVerifier: token(),
+      ownerRecoverySecret: creatorBrowserVerifier
+    });
+    const tokenOnlySession = await browserTokenOnly.events.waitFor("group_session");
+    expect(tokenOnlySession.personaKind).toBe("primary");
+    expect(tokenOnlySession.persona).toEqual(primarySession.persona);
+    expect(tokenOnlySession.ownerAuthorized).toBe(false);
+    expect(tokenOnlySession.ownerCapability).toBeUndefined();
+    browserTokenOnly.close();
+    await waitUntil(() => server.groupManager.stats().participants === 3, 1_000);
+
+    const recovered = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier: creatorBrowserVerifier,
+      tabVerifier: token(),
+      ownerRecoverySecret: owner.recoverySecret
+    });
+    const recoveredSession = await recovered.events.waitFor("group_session");
+    expect(recoveredSession.personaKind).toBe("primary");
+    expect(recoveredSession.persona).toEqual(primarySession.persona);
+    expect(recoveredSession.ownerAuthorized).toBe(true);
+    expect(recoveredSession.ownerCapability).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(recoveredSession.ownerCapability).not.toBe(owner.capability);
+
+    recovered.send({ type: "group_destroy", ownerCapability: owner.capability });
+    await recovered.events.waitFor("group_forbidden");
+    expect(server.groupManager.stats().activeRooms).toBe(1);
+
+    recovered.send({ type: "group_destroy", ownerCapability: recoveredSession.ownerCapability! });
+    await recovered.events.waitFor("group_destroyed");
+    expect(server.groupManager.stats().activeRooms).toBe(0);
+    const staleRecovery = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier: creatorBrowserVerifier,
+      tabVerifier: token(),
+      ownerRecoverySecret: owner.recoverySecret
+    });
+    await staleRecovery.events.waitFor("group_room_gone");
+  });
+
+  it("uses an absolute creation TTL and cleans all room references", async () => {
+    const { server, httpUrl, wsUrl } = await start({ groupHardTtlMs: 400 });
+    const owner = ownerCredentials();
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
+    const browserVerifier = token();
+    const participant = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: token()
+    });
+    await participant.events.waitFor("group_session");
+    expect(server.groupManager.stats().activeRooms).toBe(1);
+    expect(server.groupManager.stats()).toMatchObject({ personaMappings: 1, usedPersonas: 1 });
     await waitUntil(() => server.groupManager.stats().activeRooms === 0, 1_000);
     const gone = await fetch(`${httpUrl}/g/${created.inviteToken}`);
     expect(gone.status).toBe(410);
     const stats = await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot;
     expect(stats.groups.totals.group_destroyed_ttl).toBe(1);
     expect(stats.groups.totals.group_responses_410).toBe(1);
-    expect(server.groupManager.stats().storedMessages).toBe(0);
+    expect(server.groupManager.stats()).toMatchObject({
+      storedMessages: 0,
+      personaMappings: 0,
+      usedPersonas: 0
+    });
+    const stale = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      browserVerifier,
+      tabVerifier: token(),
+      ownerRecoverySecret: owner.recoverySecret
+    });
+    await stale.events.waitFor("group_room_gone");
   });
 
   it("does not activate a partial roster during a join racing disconnect grace", async () => {
     await groupSodiumReady();
     const { httpUrl, wsUrl } = await start({ disconnectGraceMs: 140 });
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
     const linkSecret = token();
     const a = await SecureGroupClient.connect(wsUrl, {
       type: "group_join",
@@ -487,7 +779,7 @@ describe("experimental group room lifecycle", () => {
   it("rejects self-asserted READY poisoning without selecting a digest or evicting honest members", async () => {
     const { httpUrl, wsUrl, server } = await start({ groupRekeyTimeoutMs: 80 });
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
     const a = await RawGroupClient.connect(wsUrl, {
       type: "group_join",
       inviteToken: created.inviteToken,
@@ -522,7 +814,7 @@ describe("experimental group room lifecycle", () => {
     await groupSodiumReady();
     const { httpUrl, wsUrl } = await start();
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
     const linkSecret = token();
     const a = await SecureGroupClient.connect(wsUrl, {
       type: "group_join",
@@ -547,7 +839,7 @@ describe("experimental group room lifecycle", () => {
     await groupSodiumReady();
     const { httpUrl, wsUrl } = await start({ groupRekeyTimeoutMs: 5_000 });
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
     const linkSecret = token();
     const clients: SecureGroupClient[] = [];
     for (let index = 0; index < 10; index += 1) {
@@ -572,7 +864,7 @@ describe("experimental group room lifecycle", () => {
       groupRelayWindowMs: 80
     });
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
     const linkSecret = token();
     const a = await SecureGroupClient.connect(wsUrl, {
       type: "group_join",
@@ -606,7 +898,7 @@ describe("experimental group room lifecycle", () => {
     await groupSodiumReady();
     const { httpUrl, wsUrl } = await start();
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
     const linkSecret = token();
     const a = await SecureGroupClient.connect(wsUrl, {
       type: "group_join",
@@ -647,6 +939,11 @@ describe("experimental group room lifecycle", () => {
       body: JSON.stringify({ ownerVerifier: owner.verifier })
     });
     expect(response.status).toBe(404);
+    const stats = await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot;
+    expect(stats.groups.now).toEqual({ rooms: 0, participants: 0 });
+    expect(stats.groups.totals).toEqual(
+      Object.fromEntries(GROUP_METRIC_NAMES.map((name) => [name, 0]))
+    );
     expect((await fetch(`${httpUrl}/g/${token()}`)).status).toBe(410);
     expect(await (await fetch(`${httpUrl}/api/features`)).json()).toEqual({ groupRooms: false });
   });

@@ -527,13 +527,21 @@ function DirectChatApp() {
       await sodiumReady();
       const linkSecret = createLinkSecret();
       const ownerCapability = createLinkSecret();
+      const ownerRecoverySecret = createLinkSecret();
+      const [ownerCapabilityVerifier, ownerRecoveryVerifier] = await Promise.all([
+        ownerVerifier(ownerCapability),
+        ownerVerifier(ownerRecoverySecret)
+      ]);
       const response = await fetch("/api/group-rooms", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "X-410-Source": currentTrafficSource()
         },
-        body: JSON.stringify({ ownerVerifier: await ownerVerifier(ownerCapability) })
+        body: JSON.stringify({
+          ownerVerifier: ownerCapabilityVerifier,
+          ownerRecoveryVerifier
+        })
       });
       if (response.status === 429) {
         setNotice("Too many rooms were created from this connection. Please try again later.");
@@ -547,7 +555,7 @@ function DirectChatApp() {
         inviteToken: string;
         expiresAt: number;
       };
-      storeCreatedGroup({ ...created, linkSecret, ownerCapability });
+      storeCreatedGroup({ ...created, linkSecret, ownerCapability, ownerRecoverySecret });
       const url = `/g/${encodeURIComponent(created.inviteToken)}#secret=${encodeURIComponent(linkSecret)}`;
       window.location.assign(url);
     } catch {
@@ -611,17 +619,16 @@ function DirectChatApp() {
           <div className="start-actions">
             <div className="start-action">
               <button className="primary-action" type="button" onClick={startConversation} aria-describedby="direct-action-description">Start</button>
-              <p id="direct-action-description">1-to-1 private chat</p>
+              <p id="direct-action-description">1-to-1 private chat · 30 minutes</p>
             </div>
             {groupRoomsEnabled && (
               <div className="start-action">
                 <button className="secondary-action" type="button" onClick={startGroupRoom} aria-describedby="group-action-description">Create a room</button>
-                <p id="group-action-description">Temporary room for a group</p>
+                <p id="group-action-description">Experimental E2E · up to 10 people · 24 hours</p>
               </div>
             )}
           </div>
           {notice && <p className="error-text" role="status">{notice}</p>}
-          <p className="start-technical">E2E encrypted · 2 people · 30 minutes</p>
           <SecurityLink onOpen={() => setInfoPanel("security")} />
         </section>
         <InfoDialog panel={infoPanel} onClose={() => setInfoPanel(null)} />

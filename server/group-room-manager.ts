@@ -5,14 +5,18 @@ import {
   GROUP_GONE_MESSAGE,
   type GroupClientCommand,
   type GroupEpochDescriptor,
+  type GroupMemberPersona,
+  type GroupPersona,
   type GroupRoomPhase,
   type GroupRoomState,
   type GroupServerEvent
 } from "../shared/group-protocol.js";
 import type { TrafficSource } from "./attribution.js";
+import { allocateGroupPersona } from "./group-persona.js";
 
 export const GROUP_HARD_TTL_MS = 24 * 60 * 60 * 1000;
 export const GROUP_MAX_PARTICIPANTS = 10;
+export const GROUP_MAX_BROWSER_SESSIONS = 3;
 
 export interface GroupRoomManagerConfig {
   hardTtlMs: number;
@@ -75,6 +79,10 @@ export interface CreateGroupRoomResult {
 
 interface GroupMember {
   id: string;
+  browserHash: Buffer;
+  tabHash: Buffer;
+  persona: GroupPersona;
+  personaKind: "primary" | "ephemeral";
   resumeHash: Buffer;
   ownerAuthorized: boolean;
   socket?: WebSocket;
@@ -84,6 +92,12 @@ interface GroupMember {
   disconnectTimer?: NodeJS.Timeout;
   relayTimes: number[];
   inboundFrames: Array<{ at: number; bytes: number }>;
+}
+
+interface PrimaryPersona {
+  browserHash: Buffer;
+  persona: GroupPersona;
+  primaryMemberId?: string;
 }
 
 interface StoredAnnouncement {
@@ -104,6 +118,8 @@ interface GroupRoom {
   phase: GroupRoomPhase;
   inviteHash: Buffer;
   ownerVerifier: Buffer;
+  ownerRecoveryVerifier: Buffer;
+  ownerBrowserHash?: Buffer;
   createdAt: number;
   expiresAt: number;
   hardTtlTimer: NodeJS.Timeout;
@@ -119,6 +135,8 @@ interface GroupRoom {
   readyEpochDigest?: string;
   conversationStarted: boolean;
   relayTimes: number[];
+  primaryPersonas: Map<string, PrimaryPersona>;
+  usedNicknames: Set<string>;
 }
 
 interface GroupConnectionContext {
@@ -179,12 +197,22 @@ function parseGroupCommand(raw: string): GroupClientCommand | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const ownerCapability = typeof record.ownerCapability === "string" ? record.ownerCapability : undefined;
+  const ownerRecoverySecret = typeof record.ownerRecoverySecret === "string" ? record.ownerRecoverySecret : undefined;
   if (
     record.type === "group_join" && typeof record.inviteToken === "string" &&
-    exactKeys(record, ["type", "inviteToken"], ["ownerCapability"]) &&
-    (record.ownerCapability === undefined || typeof record.ownerCapability === "string")
+    typeof record.browserVerifier === "string" && typeof record.tabVerifier === "string" &&
+    exactKeys(record, ["type", "inviteToken", "browserVerifier", "tabVerifier"], ["ownerCapability", "ownerRecoverySecret"]) &&
+    (record.ownerCapability === undefined || typeof record.ownerCapability === "string") &&
+    (record.ownerRecoverySecret === undefined || typeof record.ownerRecoverySecret === "string")
   ) {
-    return { type: "group_join", inviteToken: record.inviteToken, ...(ownerCapability ? { ownerCapability } : {}) };
+    return {
+      type: "group_join",
+      inviteToken: record.inviteToken,
+      browserVerifier: record.browserVerifier,
+      tabVerifier: record.tabVerifier,
+      ...(ownerCapability ? { ownerCapability } : {}),
+      ...(ownerRecoverySecret ? { ownerRecoverySecret } : {})
+    };
   }
   if (
     record.type === "group_resume" &&
@@ -364,14 +392,21 @@ export class GroupRoomManager {
 
   createRoom(
     ownerVerifier: string,
+    ownerRecoveryVerifier: string,
     now = Date.now(),
     source: TrafficSource = "direct"
   ): CreateGroupRoomResult | null {
     const verifier = decodeVerifier(ownerVerifier);
-    if (!verifier) throw new Error("Invalid owner verifier");
+    const recoveryVerifier = decodeVerifier(ownerRecoveryVerifier);
+    if (!verifier || !recoveryVerifier) {
+      verifier?.fill(0);
+      recoveryVerifier?.fill(0);
+      throw new Error("Invalid owner verifier");
+    }
     const emptyRooms = [...this.rooms.values()].filter((room) => room.members.size === 0).length;
     if (this.rooms.size >= this.config.maxRooms || emptyRooms >= this.config.maxEmptyRooms) {
       verifier.fill(0);
+      recoveryVerifier.fill(0);
       return null;
     }
     let roomId = randomToken(24);
@@ -393,6 +428,7 @@ export class GroupRoomManager {
       phase: "ACTIVE",
       inviteHash,
       ownerVerifier: verifier,
+      ownerRecoveryVerifier: recoveryVerifier,
       createdAt: now,
       expiresAt,
       hardTtlTimer,
@@ -405,7 +441,9 @@ export class GroupRoomManager {
       announcements: new Map(),
       confirmations: new Map(),
       conversationStarted: false,
-      relayTimes: []
+      relayTimes: [],
+      primaryPersonas: new Map(),
+      usedNicknames: new Set()
     };
     this.rooms.set(roomId, room);
     this.inviteIndex.set(inviteHash.toString("hex"), roomId);
@@ -446,7 +484,14 @@ export class GroupRoomManager {
         return;
       }
       const attached = command.type === "group_join"
-        ? this.join(socket, command.inviteToken, command.ownerCapability)
+        ? this.join(
+            socket,
+            command.inviteToken,
+            command.browserVerifier,
+            command.tabVerifier,
+            command.ownerCapability,
+            command.ownerRecoverySecret
+          )
         : command.type === "group_resume"
           ? this.resume(socket, command.roomId, command.memberId, command.resumeToken, command.ownerCapability)
           : false;
@@ -465,21 +510,105 @@ export class GroupRoomManager {
     socket.once("close", () => clearTimeout(authTimer));
   }
 
-  private join(socket: WebSocket, inviteToken: string, ownerCapability?: string): boolean {
+  private join(
+    socket: WebSocket,
+    inviteToken: string,
+    browserVerifier: string,
+    tabVerifier: string,
+    ownerCapability?: string,
+    ownerRecoverySecret?: string
+  ): boolean {
     const room = this.roomForInvite(inviteToken);
     if (!room) return this.gone(socket);
+    const decodedBrowserVerifier = decodeVerifier(browserVerifier);
+    const decodedTabVerifier = decodeVerifier(tabVerifier);
+    if (!decodedBrowserVerifier || !decodedTabVerifier) {
+      decodedBrowserVerifier?.fill(0);
+      decodedTabVerifier?.fill(0);
+      return this.gone(socket);
+    }
+    const browserHash = sha256(decodedBrowserVerifier);
+    const tabHash = sha256(decodedTabVerifier);
+    decodedBrowserVerifier.fill(0);
+    decodedTabVerifier.fill(0);
+    const browserKey = browserHash.toString("hex");
+    const primary = room.primaryPersonas.get(browserKey);
+
+    const sameTab = [...room.members.values()].find((candidate) =>
+      timingSafeEqual(candidate.browserHash, browserHash) && timingSafeEqual(candidate.tabHash, tabHash)
+    );
+    if (sameTab) this.replaceMember(room, sameTab);
+
+    const primaryMember = primary?.primaryMemberId
+      ? room.members.get(primary.primaryMemberId)
+      : undefined;
+    if (primaryMember && !primaryMember.connected) this.replaceMember(room, primaryMember);
+
+    const browserSessionCount = [...room.members.values()].filter((candidate) =>
+      timingSafeEqual(candidate.browserHash, browserHash)
+    ).length;
+    if (browserSessionCount >= GROUP_MAX_BROWSER_SESSIONS) {
+      browserHash.fill(0);
+      tabHash.fill(0);
+      this.send(socket, { type: "group_browser_limit", maxSessions: GROUP_MAX_BROWSER_SESSIONS });
+      socket.close(4410, "browser session limit");
+      return false;
+    }
     if (room.members.size >= this.config.maxParticipants) {
+      browserHash.fill(0);
+      tabHash.fill(0);
       this.send(socket, { type: "group_room_full", maxParticipants: this.config.maxParticipants });
       socket.close(4409, "room full");
       return false;
     }
+    let primaryPersona = primary;
+    if (!primaryPersona) {
+      const unavailableColors = new Set([
+        ...[...room.primaryPersonas.values()].map((entry) => entry.persona.color),
+        ...[...room.members.values()].map((entry) => entry.persona.color)
+      ]);
+      primaryPersona = {
+        browserHash: Buffer.from(browserHash),
+        persona: allocateGroupPersona(
+          room.usedNicknames,
+          unavailableColors,
+          [...room.members.values()].map((entry) => entry.persona.color)
+        )
+      };
+      room.primaryPersonas.set(browserKey, primaryPersona);
+    }
+    const personaKind = primaryPersona.primaryMemberId ? "ephemeral" : "primary";
+    const persona = personaKind === "primary"
+      ? primaryPersona.persona
+      : allocateGroupPersona(
+          room.usedNicknames,
+          new Set([
+            ...[...room.primaryPersonas.values()].map((entry) => entry.persona.color),
+            ...[...room.members.values()].map((entry) => entry.persona.color)
+          ]),
+          [...room.members.values()].map((entry) => entry.persona.color)
+        );
+    const suppliedOwnerCapability = this.ownerMatches(room, ownerCapability);
+    if (
+      suppliedOwnerCapability && personaKind === "primary" && !room.ownerBrowserHash &&
+      this.ownerRecoveryMatches(room, ownerRecoverySecret)
+    ) {
+      room.ownerBrowserHash = Buffer.from(browserHash);
+    }
+    const recoveredOwnerCapability = !suppliedOwnerCapability && personaKind === "primary"
+      ? this.recoverOwnerCapability(room, browserHash, ownerRecoverySecret)
+      : undefined;
     const memberId = this.uniqueMemberId(room);
     const resumeToken = randomToken(32);
     const resumeHash = sha256(resumeToken);
     const member: GroupMember = {
       id: memberId,
+      browserHash,
+      tabHash,
+      persona,
+      personaKind,
       resumeHash,
-      ownerAuthorized: this.ownerMatches(room, ownerCapability),
+      ownerAuthorized: suppliedOwnerCapability || Boolean(recoveredOwnerCapability),
       socket,
       connected: true,
       lastSeenAt: Date.now(),
@@ -488,10 +617,11 @@ export class GroupRoomManager {
       inboundFrames: []
     };
     room.members.set(member.id, member);
+    if (personaKind === "primary") primaryPersona.primaryMemberId = member.id;
     this.resumeIndex.set(resumeHash.toString("hex"), { roomId: room.id, memberId: member.id });
     this.contexts.set(socket, { roomId: room.id, memberId: member.id, generation: member.connectionGeneration });
     this.rotateEpoch(room);
-    this.sendSession(room, member, resumeToken);
+    this.sendSession(room, member, resumeToken, recoveredOwnerCapability);
     this.broadcastEpoch(room, socket);
     this.broadcastPresence(room);
     this.hooks.onParticipantJoined?.(room.source);
@@ -803,9 +933,21 @@ export class GroupRoomManager {
     member.inboundFrames.length = 0;
     room.readyDigests.delete(member.id);
     room.members.delete(member.id);
+    if (member.personaKind === "primary") {
+      const primary = room.primaryPersonas.get(member.browserHash.toString("hex"));
+      if (primary?.primaryMemberId === member.id) primary.primaryMemberId = undefined;
+    }
+    member.browserHash.fill(0);
+    member.tabHash.fill(0);
     if (member.socket) this.contexts.delete(member.socket);
     member.socket = undefined;
     member.connected = false;
+  }
+
+  private replaceMember(room: GroupRoom, member: GroupMember): void {
+    const previousSocket = member.socket;
+    this.removeMember(room, member);
+    if (previousSocket) previousSocket.close(4001, "session replaced");
   }
 
   private sweepHeartbeats(): void {
@@ -839,16 +981,24 @@ export class GroupRoomManager {
     if (room.rekeyTimer) clearTimeout(room.rekeyTimer);
     room.inviteHash.fill(0);
     room.ownerVerifier.fill(0);
+    room.ownerRecoveryVerifier.fill(0);
+    room.ownerBrowserHash?.fill(0);
+    room.ownerBrowserHash = undefined;
     room.readyDigests.clear();
     room.announcements.clear();
     room.confirmations.clear();
     room.relayTimes.length = 0;
+    for (const primary of room.primaryPersonas.values()) primary.browserHash.fill(0);
+    room.primaryPersonas.clear();
+    room.usedNicknames.clear();
     const members = [...room.members.values()];
     room.members.clear();
     for (const member of members) {
       if (member.disconnectTimer) clearTimeout(member.disconnectTimer);
       this.resumeIndex.delete(member.resumeHash.toString("hex"));
       member.resumeHash.fill(0);
+      member.browserHash.fill(0);
+      member.tabHash.fill(0);
       member.relayTimes.length = 0;
       member.inboundFrames.length = 0;
       if (member.socket) {
@@ -885,6 +1035,28 @@ export class GroupRoomManager {
   private ownerMatches(room: GroupRoom, ownerCapability?: string): boolean {
     if (!ownerCapability) return false;
     return hashesEqual(room.ownerVerifier, hashCapability(ownerCapability));
+  }
+
+  private ownerRecoveryMatches(room: GroupRoom, ownerRecoverySecret?: string): boolean {
+    if (!ownerRecoverySecret) return false;
+    return hashesEqual(room.ownerRecoveryVerifier, hashCapability(ownerRecoverySecret));
+  }
+
+  private recoverOwnerCapability(
+    room: GroupRoom,
+    browserHash: Buffer,
+    ownerRecoverySecret?: string
+  ): string | undefined {
+    if (
+      !room.ownerBrowserHash || !timingSafeEqual(room.ownerBrowserHash, browserHash) ||
+      !this.ownerRecoveryMatches(room, ownerRecoverySecret)
+    ) return undefined;
+    const capability = randomToken(32);
+    const verifier = hashCapability(capability);
+    if (!verifier) return undefined;
+    room.ownerVerifier.fill(0);
+    room.ownerVerifier = verifier;
+    return capability;
   }
 
   private attached(socket: WebSocket): { room: GroupRoom; member: GroupMember } | undefined {
@@ -943,13 +1115,26 @@ export class GroupRoomManager {
     };
   }
 
-  private sendSession(room: GroupRoom, member: GroupMember, resumeToken: string): void {
+  private personaRoster(room: GroupRoom): GroupMemberPersona[] {
+    return room.epochMembers.map((memberId) => {
+      const member = room.members.get(memberId)!;
+      return { memberId, ...member.persona };
+    });
+  }
+
+  private sendSession(
+    room: GroupRoom,
+    member: GroupMember,
+    resumeToken: string,
+    ownerCapability?: string
+  ): void {
     this.send(member.socket!, {
       type: "group_session",
       roomId: room.id,
       memberId: member.id,
       resumeToken,
       ownerAuthorized: member.ownerAuthorized,
+      ...(ownerCapability ? { ownerCapability } : {}),
       state: "OPEN",
       phase: room.phase,
       expiresAt: room.expiresAt,
@@ -957,13 +1142,21 @@ export class GroupRoomManager {
       disconnectGraceMs: this.config.disconnectGraceMs,
       maxParticipants: this.config.maxParticipants,
       presenceCount: room.members.size,
+      persona: { ...member.persona },
+      personaKind: member.personaKind,
+      personas: this.personaRoster(room),
       ...this.epochDescriptor(room)
     });
   }
 
   private broadcastEpoch(room: GroupRoom, excluded?: WebSocket): void {
     if (!room.epochMembers.length) return;
-    this.broadcast(room, { type: "group_epoch", phase: "REKEYING", ...this.epochDescriptor(room) }, excluded);
+    this.broadcast(room, {
+      type: "group_epoch",
+      phase: "REKEYING",
+      personas: this.personaRoster(room),
+      ...this.epochDescriptor(room)
+    }, excluded);
   }
 
   private broadcastPresence(room: GroupRoom): void {
@@ -1011,16 +1204,26 @@ export class GroupRoomManager {
     participants: number;
     connectedSockets: number;
     storedMessages: number;
+    personaMappings: number;
+    usedPersonas: number;
   } {
     let participants = 0;
-    for (const room of this.rooms.values()) participants += room.members.size;
+    let personaMappings = 0;
+    let usedPersonas = 0;
+    for (const room of this.rooms.values()) {
+      participants += room.members.size;
+      personaMappings += room.primaryPersonas.size;
+      usedPersonas += room.usedNicknames.size;
+    }
     return {
       activeRooms: this.rooms.size,
       inviteTokens: this.inviteIndex.size,
       resumeTokens: this.resumeIndex.size,
       participants,
       connectedSockets: this.contexts.size,
-      storedMessages: 0
+      storedMessages: 0,
+      personaMappings,
+      usedPersonas
     };
   }
 

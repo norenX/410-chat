@@ -198,4 +198,37 @@ describe("MetricsStore", () => {
     await store.close();
     expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(3);
   });
+
+  it("loads version 3 direct history when the optional group section is absent", async () => {
+    const filePath = await temporaryMetricsFile();
+    const now = Date.parse("2026-08-23T12:00:00Z");
+    const totals = Object.fromEntries(METRIC_NAMES.map((name, index) => [name, index + 10]));
+    const sourceCounts = {
+      homepage_views: totals.homepage_views,
+      rooms_created: totals.rooms_created,
+      conversations_started: totals.conversations_started,
+      messages_relayed: totals.messages_relayed
+    };
+    await fs.writeFile(filePath, JSON.stringify({
+      version: 3,
+      totals,
+      days: { "2026-08-23": totals },
+      sources: {
+        totals: { direct: sourceCounts },
+        days: { "2026-08-23": { direct: sourceCounts } }
+      }
+    }));
+
+    const store = new MetricsStore(filePath, { now: () => now });
+    await store.init();
+    const snapshot = store.snapshot({ waiting: 1, active: 2 });
+    expect(snapshot.totals).toEqual(totals);
+    expect(snapshot.today).toEqual(totals);
+    expect(snapshot.groups.now).toEqual({ rooms: 0, participants: 0 });
+    expect(snapshot.groups.totals).toEqual(
+      Object.fromEntries(GROUP_METRIC_NAMES.map((name) => [name, 0]))
+    );
+    expect(snapshot.groups.today).toEqual(snapshot.groups.totals);
+    await store.close();
+  });
 });

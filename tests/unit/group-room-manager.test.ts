@@ -40,12 +40,18 @@ const managers: GroupRoomManager[] = [];
 function room(manager: GroupRoomManager): { inviteToken: string } {
   const capability = randomBytes(32);
   const verifier = createHash("sha256").update(capability).digest("base64url");
-  return manager.createRoom(verifier)!;
+  const recoveryVerifier = createHash("sha256").update(randomBytes(32)).digest("base64url");
+  return manager.createRoom(verifier, recoveryVerifier)!;
 }
 
 function join(manager: GroupRoomManager, socket: FakeSocket, inviteToken: string): void {
   manager.acceptSocket(socket as unknown as WebSocket);
-  socket.receive({ type: "group_join", inviteToken });
+  socket.receive({
+    type: "group_join",
+    inviteToken,
+    browserVerifier: randomBytes(32).toString("base64url"),
+    tabVerifier: randomBytes(32).toString("base64url")
+  });
 }
 
 afterEach(() => {
@@ -58,10 +64,11 @@ describe("GroupRoomManager hardening", () => {
     managers.push(manager);
     const first = room(manager);
     const verifier = createHash("sha256").update(randomBytes(32)).digest("base64url");
-    expect(manager.createRoom(verifier)).toBeNull();
+    const recoveryVerifier = createHash("sha256").update(randomBytes(32)).digest("base64url");
+    expect(manager.createRoom(verifier, recoveryVerifier)).toBeNull();
 
     join(manager, new FakeSocket(), first.inviteToken);
-    expect(manager.createRoom(verifier)).not.toBeNull();
+    expect(manager.createRoom(verifier, recoveryVerifier)).not.toBeNull();
   });
 
   it("terminates a slow consumer before queuing another server event", () => {

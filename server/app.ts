@@ -308,13 +308,14 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
         return;
       }
       const ownerVerifier = parsed.value?.ownerVerifier;
-      if (typeof ownerVerifier !== "string") {
+      const ownerRecoveryVerifier = parsed.value?.ownerRecoveryVerifier;
+      if (typeof ownerVerifier !== "string" || typeof ownerRecoveryVerifier !== "string") {
         json(response, 400, { error: "invalid_request" });
         return;
       }
       try {
         const source = normalizeTrafficSource(request.headers["x-410-source"]);
-        const created = groupManager.createRoom(ownerVerifier, Date.now(), source);
+        const created = groupManager.createRoom(ownerVerifier, ownerRecoveryVerifier, Date.now(), source);
         if (!created) {
           json(response, 503, { error: "capacity_reached" });
           return;

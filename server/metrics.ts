@@ -285,18 +285,21 @@ function parseDocument(value: unknown): MetricsDocument | null {
   let groupTotals = emptyGroupCounts();
   const groupDays: Record<string, GroupMetricCounts> = {};
 
-  if (record.version === 3) {
+  if (record.version === 3 && record.groups !== undefined) {
     if (!record.groups || typeof record.groups !== "object" || Array.isArray(record.groups)) return null;
     const groupRecord = record.groups as Record<string, unknown>;
-    const parsedTotals = parseGroupCounts(groupRecord.totals);
-    if (!parsedTotals || !groupRecord.days || typeof groupRecord.days !== "object" || Array.isArray(groupRecord.days)) {
-      return null;
+    if (groupRecord.totals !== undefined) {
+      const parsedTotals = parseGroupCounts(groupRecord.totals);
+      if (!parsedTotals) return null;
+      groupTotals = parsedTotals;
     }
-    groupTotals = parsedTotals;
-    for (const [day, rawCounts] of Object.entries(groupRecord.days as Record<string, unknown>)) {
-      const counts = parseGroupCounts(rawCounts);
-      if (!isUtcDay(day) || !counts) return null;
-      groupDays[day] = counts;
+    if (groupRecord.days !== undefined) {
+      if (!groupRecord.days || typeof groupRecord.days !== "object" || Array.isArray(groupRecord.days)) return null;
+      for (const [day, rawCounts] of Object.entries(groupRecord.days as Record<string, unknown>)) {
+        const counts = parseGroupCounts(rawCounts);
+        if (!isUtcDay(day) || !counts) return null;
+        groupDays[day] = counts;
+      }
     }
   }
 

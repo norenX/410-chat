@@ -52,6 +52,25 @@ The group invite fragment contains a shared admission/authentication secret.
 Possession proves access to the invite secret; it does not establish a stable
 or unique participant identity.
 
+Group nicknames and colors are presentation metadata only. A random token in
+`localStorage` preserves a primary persona for one browser in one room; each
+additional tab has a separate `sessionStorage` token and live member slot. The
+server receives only token verifiers, stores only their hashes in room memory,
+and does not place them in metrics. This permits same-room tab correlation and
+does not authenticate the human behind a nickname. Reload/re-entry still uses
+a fresh member ID and full cryptographic epoch and restores no messages.
+
+Creator recovery uses a second, independent 256-bit room secret in
+`localStorage`. The relay stores only its verifier and binds recovery to the
+browser profile that first proves both the original owner capability and the
+recovery secret as the room's primary persona. A later primary re-entry from
+that profile can rotate to a fresh tab-scoped owner capability. The persona
+token alone, an additional ephemeral tab, or an invite holder from another
+profile cannot recover Destroy authority. Same-origin script compromise can
+read both persistent browser secrets and is outside this boundary.
+The raw recovery secret is presented transiently in the recovery join command;
+the relay hashes it for comparison and does not retain it.
+
 Join secrecy begins when a new epoch is committed: a new member receives no
 keys for prior epochs. Leave secrecy begins only after disconnect grace expires
 and the remaining members commit a new epoch. A former member that still has
@@ -226,6 +245,8 @@ Before enabling group rooms in production, independently review at least:
 - stale epoch, replay, and duplicate-sequence handling;
 - JavaScript best-effort key erasure;
 - owner-capability verification;
+- room-scoped persona verifier isolation, three-tab admission races, and
+  persona metadata spoofing boundaries;
 - malicious relay and malicious invite-holder behavior.
 
 ## Reporting a vulnerability

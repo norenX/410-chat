@@ -137,13 +137,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   color: #333;
 }
 
-.start-technical {
-  margin: 32px 0 0;
-  color: #333;
-  font-size: 15px;
-  line-height: 1.45;
-}
-
 .start-security {
   display: inline-block;
   margin-top: 28px;
@@ -414,6 +407,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   min-width: 0;
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 16px;
 }
 
@@ -429,6 +423,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   font-size: 13px;
   white-space: nowrap;
 }
+
+.group-self-persona {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.group-self-persona strong { font-weight: 700; }
 
 .group-room-actions {
   display: flex;
@@ -502,6 +504,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   color: var(--quiet);
   font-size: 13px;
   line-height: 1.6;
+  text-align: center;
+}
+
+.group-presence-event {
+  margin: 12px auto 24px;
+  color: var(--quiet);
+  font-size: 12px;
+  line-height: 1.5;
   text-align: center;
 }
 
@@ -589,6 +599,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.group-message-author {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .message time {
@@ -745,7 +763,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .start-page .start-intro { margin-top: 25px; font-size: 18px; }
   .start-actions { width: 100%; }
   .start-page .primary-action { width: 100%; min-height: 58px; margin-top: 30px; }
-  .start-technical { margin-top: 32px; }
   .security-page { padding: 44px 24px 64px; }
   .security-header { margin-bottom: 56px; }
   .security-document section { margin-top: 48px; }

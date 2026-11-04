@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { GroupClientCommand, GroupServerEvent } from "../../shared/group-protocol.js";
+import {
+  GROUP_PERSONA_COLORS,
+  type GroupClientCommand,
+  type GroupMemberPersona,
+  type GroupPersona,
+  type GroupServerEvent
+} from "../../shared/group-protocol.js";
 import {
   GroupCryptoError,
   GroupCryptoSession,
@@ -7,9 +13,14 @@ import {
   isRecoverableGroupCryptoError,
   type GroupDecryptedMessage
 } from "./group-crypto-session";
+import {
+  createActivePersonaRoster,
+  diffActivePersonaRosters,
+  type ActivePersonaRoster
+} from "./group-presence";
 import { QrInviteDialog } from "./QrInviteDialog";
 
-type GroupView = "connecting" | "rekeying" | "active" | "reconnecting" | "full";
+type GroupView = "connecting" | "rekeying" | "active" | "reconnecting" | "full" | "browser-limit";
 type CopyState = "idle" | "copied" | "manual";
 
 interface StoredGroupSession {
@@ -23,6 +34,7 @@ interface StoredGroupSession {
   expiresAt: number;
   disconnectGraceMs?: number;
   showInviteOnLoad?: boolean;
+  tabVerifier?: string;
 }
 
 export interface CreatedGroupSession {
@@ -30,15 +42,27 @@ export interface CreatedGroupSession {
   inviteToken: string;
   linkSecret: string;
   ownerCapability: string;
+  ownerRecoverySecret: string;
   expiresAt: number;
 }
 
 interface GroupMessage {
+  kind: "message";
   id: string;
   text: string;
   sentAt: number;
   side: "self" | "peer";
+  authorNickname?: string;
+  authorColor?: string;
 }
+
+interface GroupPresenceItem {
+  kind: "presence";
+  id: string;
+  text: string;
+}
+
+type GroupStreamItem = GroupMessage | GroupPresenceItem;
 
 interface PendingRelay {
   relayId: string;
@@ -46,22 +70,31 @@ interface PendingRelay {
 }
 
 const GROUP_SESSION_KEY = "410.group.session.v1";
+const GROUP_BROWSER_TOKEN_PREFIX = "410.group.browser.v1.";
+const GROUP_TAB_TOKEN_PREFIX = "410.group.tab.v1.";
+const GROUP_OWNER_RECOVERY_PREFIX = "410.group.owner-recovery.v1.";
 const GROUP_INVITE_PATH = /^\/g\/([A-Za-z0-9_-]{43})$/;
 const AUTO_SCROLL_THRESHOLD = 80;
 const MAX_RENDERED_MESSAGES = 500;
 const MAX_DATE_MS = 8_640_000_000_000_000;
+const PERSONA_COLORS = new Set<string>(GROUP_PERSONA_COLORS);
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const MEMBER_ID_PATTERN = /^[A-Za-z0-9_-]{24}$/;
+const NICKNAME_PATTERN = /^[A-Za-z][A-Za-z0-9 ]{1,62}$/;
 
-function appendBoundedMessage(messages: GroupMessage[], message: GroupMessage): GroupMessage[] {
+function appendBoundedMessage(messages: GroupStreamItem[], message: GroupStreamItem): GroupStreamItem[] {
   if (messages.length < MAX_RENDERED_MESSAGES) return [...messages, message];
   return [...messages.slice(-(MAX_RENDERED_MESSAGES - 1)), message];
 }
 
 export function storeCreatedGroup(created: CreatedGroupSession): void {
+  const { ownerRecoverySecret, ...sessionValues } = created;
   const session: StoredGroupSession = {
     version: 1,
-    ...created,
+    ...sessionValues,
     showInviteOnLoad: true
   };
+  localStorage.setItem(tokenStorageKey(GROUP_OWNER_RECOVERY_PREFIX, created.inviteToken), ownerRecoverySecret);
   sessionStorage.setItem(GROUP_SESSION_KEY, JSON.stringify(session));
 }
 
@@ -106,6 +139,80 @@ function randomRelayId(): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function randomToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function tokenStorageKey(prefix: string, inviteToken: string): string {
+  return `${prefix}${inviteToken}`;
+}
+
+function readOrCreateBrowserToken(inviteToken: string): string {
+  const key = tokenStorageKey(GROUP_BROWSER_TOKEN_PREFIX, inviteToken);
+  const stored = localStorage.getItem(key);
+  if (stored && TOKEN_PATTERN.test(stored)) return stored;
+  const token = randomToken();
+  localStorage.setItem(key, token);
+  return token;
+}
+
+function readOrCreateTabToken(inviteToken: string, preserveExisting: boolean): string {
+  const key = tokenStorageKey(GROUP_TAB_TOKEN_PREFIX, inviteToken);
+  const stored = sessionStorage.getItem(key);
+  if (preserveExisting && stored && TOKEN_PATTERN.test(stored)) return stored;
+  const token = randomToken();
+  sessionStorage.setItem(key, token);
+  return token;
+}
+
+async function tokenVerifier(token: string): Promise<string> {
+  const bytes = Uint8Array.from(atob(token.replaceAll("-", "+").replaceAll("_", "/")), (value) => value.charCodeAt(0));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function clearPersonaTokens(inviteToken: string): void {
+  localStorage.removeItem(tokenStorageKey(GROUP_BROWSER_TOKEN_PREFIX, inviteToken));
+  localStorage.removeItem(tokenStorageKey(GROUP_OWNER_RECOVERY_PREFIX, inviteToken));
+  sessionStorage.removeItem(tokenStorageKey(GROUP_TAB_TOKEN_PREFIX, inviteToken));
+}
+
+function readOwnerRecoverySecret(inviteToken: string): string | undefined {
+  const value = localStorage.getItem(tokenStorageKey(GROUP_OWNER_RECOVERY_PREFIX, inviteToken));
+  return value && TOKEN_PATTERN.test(value) ? value : undefined;
+}
+
+function isReloadNavigation(): boolean {
+  const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+  return navigation?.type === "reload";
+}
+
+function validPersona(persona: GroupPersona): boolean {
+  return Boolean(
+    persona && NICKNAME_PATTERN.test(persona.nickname) && PERSONA_COLORS.has(persona.color)
+  );
+}
+
+function validatedPersonaRoster(personas: GroupMemberPersona[], members: string[]): Map<string, GroupPersona> {
+  if (!Array.isArray(personas) || personas.length !== members.length) throw new Error("Invalid persona roster");
+  const expected = new Set(members);
+  const result = new Map<string, GroupPersona>();
+  for (const persona of personas) {
+    if (
+      !persona || !MEMBER_ID_PATTERN.test(persona.memberId) || !expected.has(persona.memberId) ||
+      result.has(persona.memberId) || !validPersona(persona)
+    ) throw new Error("Invalid persona roster");
+    result.set(persona.memberId, { nickname: persona.nickname, color: persona.color });
+  }
+  return result;
 }
 
 function safeMessageTime(sentAt: number): { dateTime?: string; label: string } {
@@ -157,7 +264,7 @@ export function GroupRoomApp() {
   const [ownerAuthorized, setOwnerAuthorized] = useState(false);
   const [expiresAt, setExpiresAt] = useState(0);
   const [remaining, setRemaining] = useState(0);
-  const [messages, setMessages] = useState<GroupMessage[]>([]);
+  const [messages, setMessages] = useState<GroupStreamItem[]>([]);
   const [draft, setDraft] = useState("");
   const [notice, setNotice] = useState("");
   const [shareOpen, setShareOpen] = useState(false);
@@ -166,6 +273,7 @@ export function GroupRoomApp() {
   const [destroyConfirm, setDestroyConfirm] = useState(false);
   const [destroying, setDestroying] = useState(false);
   const [sendPending, setSendPending] = useState(false);
+  const [selfPersona, setSelfPersona] = useState<GroupPersona | null>(null);
 
   const socketRef = useRef<WebSocket | undefined>(undefined);
   const cryptoRef = useRef<GroupCryptoSession | undefined>(undefined);
@@ -180,9 +288,21 @@ export function GroupRoomApp() {
   const eventChainRef = useRef<Promise<void>>(Promise.resolve());
   const mountedRef = useRef(true);
   const messageListRef = useRef<HTMLElement | null>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const focusComposerAfterSendRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
   const qrTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pendingRelayRef = useRef<PendingRelay | null>(null);
+  const browserVerifierRef = useRef("");
+  const tabVerifierRef = useRef("");
+  const ownerRecoverySecretRef = useRef("");
+  const personaMapRef = useRef(new Map<string, GroupPersona>());
+  const activePersonaRosterRef = useRef<ActivePersonaRoster | undefined>(undefined);
+  const pendingPersonaRosterRef = useRef<{
+    epoch: number;
+    personasByMember: Map<string, GroupPersona>;
+    roster: ActivePersonaRoster;
+  } | undefined>(undefined);
 
   const closeQr = useCallback(() => setQrOpen(false), []);
   const inviteUrl = sessionRef.current
@@ -206,15 +326,32 @@ export function GroupRoomApp() {
     }
   }
 
+  function joinCommand(local: StoredGroupSession): Extract<GroupClientCommand, { type: "group_join" }> {
+    return {
+      type: "group_join",
+      inviteToken: local.inviteToken,
+      browserVerifier: browserVerifierRef.current,
+      tabVerifier: tabVerifierRef.current,
+      ownerCapability: local.ownerCapability,
+      ...(ownerRecoverySecretRef.current
+        ? { ownerRecoverySecret: ownerRecoverySecretRef.current }
+        : {})
+    };
+  }
+
   function goToGone(): void {
     if (stoppedRef.current) return;
     stoppedRef.current = true;
     clearTimers();
     clearStoredGroup();
+    clearPersonaTokens(inviteToken);
     sessionRef.current = null;
     cryptoRef.current?.destroy();
     cryptoRef.current = undefined;
     cryptoMemberIdRef.current = "";
+    personaMapRef.current.clear();
+    activePersonaRosterRef.current = undefined;
+    pendingPersonaRosterRef.current = undefined;
     setMessages([]);
     setDraft("");
     pendingRelayRef.current = null;
@@ -239,17 +376,39 @@ export function GroupRoomApp() {
         sendReady: (ready) => {
           send({ type: "group_ready", ...ready });
         },
-        onActive: () => {
+        onActive: ({ epoch }) => {
           if (!mountedRef.current || stoppedRef.current) return;
+          const pending = pendingPersonaRosterRef.current;
+          if (pending?.epoch === epoch) {
+            const changes = diffActivePersonaRosters(activePersonaRosterRef.current, pending.roster);
+            personaMapRef.current = pending.personasByMember;
+            activePersonaRosterRef.current = pending.roster;
+            pendingPersonaRosterRef.current = undefined;
+            if (changes.length > 0) {
+              setMessages((current) => changes.reduce(
+                (items, change, index) => appendBoundedMessage(items, {
+                  kind: "presence",
+                  id: `presence:${epoch}:${change.action}:${index}:${change.persona.nickname}`,
+                  text: `${change.persona.nickname} ${change.action}`
+                }),
+                current
+              ));
+            }
+          }
           setNotice("");
           setView("active");
         },
         onMessage: (message: GroupDecryptedMessage, senderMemberId: string) => {
           if (!mountedRef.current || stoppedRef.current) return;
+          const author = personaMapRef.current.get(senderMemberId);
+          if (!author) return;
           setMessages((current) => appendBoundedMessage(current, {
             ...message,
+            kind: "message",
             id: `${senderMemberId}:${message.id}`,
-            side: "peer"
+            side: "peer",
+            authorNickname: author.nickname,
+            authorColor: author.color
           }));
         }
       }
@@ -264,6 +423,12 @@ export function GroupRoomApp() {
     const cryptoSession = !cryptoRef.current || cryptoMemberIdRef.current !== local.memberId
       ? createCrypto(local.roomId, local.memberId, local.linkSecret)
       : cryptoRef.current;
+    const personasByMember = validatedPersonaRoster(event.personas, event.members);
+    pendingPersonaRosterRef.current = {
+      epoch: event.epoch,
+      personasByMember,
+      roster: createActivePersonaRoster(personasByMember, local.memberId)
+    };
     await cryptoSession.beginEpoch({
       epoch: event.epoch,
       epochNonce: event.epochNonce,
@@ -284,11 +449,7 @@ export function GroupRoomApp() {
       const local = sessionRef.current;
       if (authType === "group_resume" && local && !resumeFallbackRef.current) {
         resumeFallbackRef.current = true;
-        connect({
-          type: "group_join",
-          inviteToken: local.inviteToken,
-          ownerCapability: local.ownerCapability
-        });
+        connect(joinCommand(local));
         return;
       }
       goToGone();
@@ -298,6 +459,12 @@ export function GroupRoomApp() {
       fullRef.current = true;
       setMaxParticipants(event.maxParticipants);
       setView("full");
+      return;
+    }
+    if (event.type === "group_browser_limit") {
+      fullRef.current = true;
+      setMaxParticipants(event.maxSessions);
+      setView("browser-limit");
       return;
     }
     if (event.type === "group_forbidden") {
@@ -318,7 +485,9 @@ export function GroupRoomApp() {
       if (!pending || pending.relayId !== event.relayId) return;
       cryptoRef.current?.commitOutbound();
       pendingRelayRef.current = null;
+      focusComposerAfterSendRef.current = true;
       setSendPending(false);
+      setDraft("");
       setMessages((current) => appendBoundedMessage(current, pending.message));
       setNotice("");
       return;
@@ -351,14 +520,21 @@ export function GroupRoomApp() {
         resumeToken: event.resumeToken,
         expiresAt: event.expiresAt,
         disconnectGraceMs: event.disconnectGraceMs,
-        showInviteOnLoad: false
+        showInviteOnLoad: false,
+        tabVerifier: tabVerifierRef.current
       };
+      if (event.ownerCapability) {
+        if (!TOKEN_PATTERN.test(event.ownerCapability)) throw new Error("Invalid recovered owner capability");
+        session.ownerCapability = event.ownerCapability;
+      }
       sessionRef.current = session;
       writeStoredGroup(session);
       retryDeadlineRef.current = 0;
       resumeFallbackRef.current = false;
       fullRef.current = false;
       setOwnerAuthorized(event.ownerAuthorized);
+      if (!validPersona(event.persona)) throw new Error("Invalid self persona");
+      setSelfPersona({ ...event.persona });
       setPresenceCount(event.presenceCount);
       setMaxParticipants(event.maxParticipants);
       setExpiresAt(event.expiresAt);
@@ -467,7 +643,7 @@ export function GroupRoomApp() {
           delete current.memberId;
           delete current.resumeToken;
           writeStoredGroup(current);
-          connect({ type: "group_join", inviteToken: current.inviteToken, ownerCapability: current.ownerCapability });
+          connect(joinCommand(current));
         }
       }, 750);
     });
@@ -493,10 +669,24 @@ export function GroupRoomApp() {
         expiresAt: Number.MAX_SAFE_INTEGER
       };
       session.linkSecret = linkSecret;
+      const reload = isReloadNavigation();
+      const browserToken = readOrCreateBrowserToken(inviteToken);
+      const tabToken = readOrCreateTabToken(inviteToken, reload);
+      ownerRecoverySecretRef.current = readOwnerRecoverySecret(inviteToken) || "";
+      [browserVerifierRef.current, tabVerifierRef.current] = await Promise.all([
+        tokenVerifier(browserToken),
+        tokenVerifier(tabToken)
+      ]);
+      const belongsToThisTab = session.tabVerifier === tabVerifierRef.current;
+      if (reload || !belongsToThisTab) {
+        delete session.memberId;
+        delete session.resumeToken;
+      }
+      if (session.tabVerifier && !belongsToThisTab) delete session.ownerCapability;
       sessionRef.current = session;
       writeStoredGroup(session);
       window.history.replaceState(null, "", window.location.pathname);
-      if (session.roomId && session.memberId && session.resumeToken) {
+      if (!reload && session.roomId && session.memberId && session.resumeToken) {
         connect({
           type: "group_resume",
           roomId: session.roomId,
@@ -505,7 +695,7 @@ export function GroupRoomApp() {
           ownerCapability: session.ownerCapability
         });
       } else {
-        connect({ type: "group_join", inviteToken, ownerCapability: session.ownerCapability });
+        connect(joinCommand(session));
       }
     })().catch(() => goToGone());
     return () => {
@@ -537,6 +727,17 @@ export function GroupRoomApp() {
     if (list && shouldAutoScrollRef.current) list.scrollTop = list.scrollHeight;
   }, [messages.length]);
 
+  useLayoutEffect(() => {
+    if (!focusComposerAfterSendRef.current || sendPending) return;
+    focusComposerAfterSendRef.current = false;
+    const input = composerInputRef.current;
+    if (
+      !mountedRef.current || stoppedRef.current || !input || input.disabled ||
+      document.visibilityState !== "visible"
+    ) return;
+    input.focus({ preventScroll: true });
+  }, [sendPending]);
+
   function updateScrollPreference(): void {
     const list = messageListRef.current;
     if (!list) return;
@@ -550,6 +751,7 @@ export function GroupRoomApp() {
       pendingRelayRef.current
     ) return;
     const message: GroupMessage = {
+      kind: "message",
       id: randomMessageId(),
       text,
       sentAt: Date.now(),
@@ -566,7 +768,6 @@ export function GroupRoomApp() {
       pendingRelayRef.current = { relayId, message };
       setSendPending(true);
       if (!send({ type: "group_relay", relayId, ...encrypted })) throw new Error("send failed");
-      setDraft("");
     } catch {
       cryptoRef.current?.rejectOutbound();
       pendingRelayRef.current = null;
@@ -634,6 +835,18 @@ export function GroupRoomApp() {
     );
   }
 
+  if (view === "browser-limit") {
+    return (
+      <main className="simple-page">
+        <section className="simple-content group-full-content">
+          <GroupLogo />
+          <h1>Too many sessions from this browser.</h1>
+          <p>Up to {maxParticipants} tabs from one browser can be in this room at once.</p>
+        </section>
+      </main>
+    );
+  }
+
   const canSend = view === "active" && presenceCount >= 2 && !sendPending;
   const peopleText = `${presenceCount} ${presenceCount === 1 ? "person" : "people"} here`;
 
@@ -643,6 +856,11 @@ export function GroupRoomApp() {
         <div className="group-room-summary">
           <strong className="group-room-label">ROOM</strong>
           <span className="group-presence" aria-live="polite">{peopleText}</span>
+          {selfPersona && (
+            <span className="group-self-persona">
+              You are <strong style={{ color: selfPersona.color }}>{selfPersona.nickname}</strong> in this room.
+            </span>
+          )}
         </div>
         <div className="group-room-actions">
           <span>Ends in {formatRemaining(remaining)}</span>
@@ -679,8 +897,15 @@ export function GroupRoomApp() {
         onScroll={updateScrollPreference}
       >
         {messages.length === 0 && <p className="group-empty-note">Messages are visible only from the moment you join.</p>}
-        {messages.map((message, index) => (
+        {messages.map((message, index) => message.kind === "presence" ? (
+          <p key={message.id} className="group-presence-event">{message.text}</p>
+        ) : (
           <article key={message.id} className={`message ${message.side}`} data-last-message={index === messages.length - 1 ? "true" : undefined}>
+            {message.side === "peer" && message.authorNickname && (
+              <strong className="group-message-author" style={{ color: message.authorColor }}>
+                {message.authorNickname}
+              </strong>
+            )}
             <p>{message.text}</p>
             <MessageTime sentAt={message.sentAt} />
           </article>
@@ -690,6 +915,7 @@ export function GroupRoomApp() {
       <form className="composer" onSubmit={(event) => { event.preventDefault(); sendMessage(); }}>
         <label className="sr-only" htmlFor="group-message">Message</label>
         <textarea
+          ref={composerInputRef}
           id="group-message"
           value={draft}
           maxLength={2000}

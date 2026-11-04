@@ -42,9 +42,10 @@ epoch digest, limiting accidental or partial-roster activation.
 Every invite holder knows the same admission secret. A malicious invite holder
 is therefore an authenticated room participant, can rejoin, can create up to
 the room capacity, can send disruptive control traffic, and can cause denial
-of service. The protocol provides no persistent participant identity and no
-out-of-band identity authentication. Any participant can copy plaintext after
-it is displayed.
+of service. The protocol provides no account, global participant identity, or
+out-of-band identity authentication. A random browser token may preserve one
+UI persona within one room, as described below; it is not a cryptographic
+identity. Any participant can copy plaintext after it is displayed.
 
 Endpoint compromise, browser extensions, screenshots, clipboard capture,
 traffic analysis, and operating-system compromise are out of scope.
@@ -59,16 +60,72 @@ Creation produces independent random values:
   HTTP requests or WebSocket commands;
 - a browser-generated 256-bit owner capability. Creation sends only
   `SHA-256(ownerCapability)` to the relay;
+- an independent browser-generated 256-bit owner recovery secret. Creation
+  sends only `SHA-256(ownerRecoverySecret)` to the relay. The raw secret is
+  kept under a room-scoped `localStorage` key and never enters an invite,
+QR, Share payload, E2EE transcript, or key derivation;
 - a random resume token per admitted live member. The relay stores only its
   SHA-256 hash.
+- a random room-scoped browser token kept in `localStorage`. The browser sends
+  only its SHA-256 verifier, and the relay stores a second SHA-256 hash while
+  the room is live. Tokens are independently generated per invite, so they do
+  not provide a cross-room browser identifier;
+- a random tab token kept in that tab's `sessionStorage`. Its SHA-256 verifier
+  lets a reload replace the old live slot without reusing the old member ID or
+  cryptographic session.
 
 The owner capability is not derived from the invite or link secret and is not
 included in Copy, QR, Web Share, or the participant URL. The browser keeps it
-in `sessionStorage`; losing it has no recovery path.
+in `sessionStorage`. On the first primary owner join, the relay binds the
+recovery verifier to that primary browser hash only after both the original
+owner capability and recovery secret are proven. If that primary session later
+disappears, a new primary session with the same browser hash and recovery
+secret receives a fresh random owner capability; the previous capability is
+invalidated. An ephemeral tab, another browser profile, the persona token by
+itself, and the invite/link secret cannot recover owner authority.
+
+This is anonymous browser-profile recovery, not human identity authentication.
+The raw recovery secret is visible transiently to the relay in a recovery join
+command, where it is hashed for verifier comparison and not retained.
+Compromise of same-origin storage or script execution can disclose both the
+persona token and recovery secret. The relay erases the recovery verifier and
+creator-browser binding on Destroy or TTL. An offline browser may retain an
+orphan local secret, but it has no verifier or room state against which it can
+be used.
 
 The relay assigns each opaque member ID and binds it to one authenticated
 WebSocket context. A client command cannot choose its member ID. Relay events
 add `from` from that server-side context.
+
+## Temporary UI personas
+
+The relay assigns every admitted member a safe adjective-and-animal nickname
+and one color from a fixed high-contrast palette. Persona metadata is bound to
+the current server-assigned member ID for presentation only. It is not placed
+in the key transcript, does not authorize a command, and is never used to
+derive a key. Nicknames are not verified human identities; a malicious relay
+can mislabel UI metadata even though it cannot thereby forge a valid encrypted
+message from another member ID.
+
+The first live session for a browser token receives that browser's primary
+persona. The primary mapping remains in server memory until room destruction,
+so reopening the same room in the same browser can restore the nickname and
+color while still allocating a fresh member ID, resume token and full-group
+crypto epoch. If that primary slot is already live, additional tabs receive
+non-persistent ephemeral personas. Grace slots count as live sessions, except
+that a new tab may atomically replace a disconnected primary slot. A reload
+with the same tab verifier similarly replaces its old slot. No message history
+is restored in either case.
+
+At most three live/grace members may share one browser verifier. A fourth is
+rejected before membership mutation. Room capacity remains ten. Active
+nicknames are unique and nicknames are not reused during the room lifetime;
+colors are unique while the fixed palette has unused entries. The relay erases
+all browser/tab verifier hashes, owner recovery state, and persona maps on
+Destroy or TTL. Connected
+clients also remove their room-scoped local token on the destruction event;
+an offline browser cannot be remotely forced to erase local storage, but the
+orphan random token has no live server mapping after destruction.
 
 ## Room and membership lifecycle
 
@@ -78,7 +135,9 @@ backlog or replay buffer.
 
 Membership change handling is:
 
-1. Join allocates a fresh server member ID and resume token.
+1. Join allocates a fresh server member ID and resume token. A document reload
+   is a new join with a fresh member ID and full crypto session; a transient
+   transport reconnect uses resume as described below.
 2. A socket disconnect retains its member and capacity slot for 15 seconds.
    The existing epoch remains usable by connected members during this grace.
    If another membership revision begins during grace, the disconnected member
@@ -352,6 +411,10 @@ invite. No tombstone database is created.
   disconnect; leave protection starts at committed removal.
 - All invite holders share the admission secret. There is no participant
   identity, Sybil resistance, kick, ban, invite rotation or revocation.
+- Nicknames and colors are transient UI labels, not proof of human identity.
+  The relay can correlate tabs that present the same room-scoped browser
+  verifier while that room is live, but the verifier is not reused across
+  rooms and is not included in aggregate metrics.
 - The reusable invite holder can re-enter as a new participant.
 - Exact next-sequence enforcement intentionally fails closed if a malicious
   relay selectively drops a frame after acknowledging it. Ordinary
@@ -370,8 +433,9 @@ invite. No tombstone database is created.
   ciphertext sizes and timing, and a transient random relay acknowledgement
   ID while an application frame is processed. These values are not persisted
   as per-room analytics.
-- Browser memory erasure is best-effort, and owner/session credentials kept in
-  `sessionStorage` are accessible to script running in the same origin.
+- Browser memory erasure is best-effort. Owner/session credentials kept in
+  `sessionStorage`, plus the room-scoped persona and owner-recovery secrets in
+  `localStorage`, are accessible to script running in the same origin.
 
 An independent protocol and implementation audit is required before any
 production rollout.

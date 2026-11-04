@@ -28,6 +28,21 @@ async function installDeniedClipboard(context: BrowserContext): Promise<void> {
   });
 }
 
+async function navigateDocument(page: Page, url: string) {
+  const requested = new URL(url);
+  const expectedDocumentUrl = `${requested.origin}${requested.pathname}${requested.search}`;
+  const responsePromise = page.waitForResponse((response) =>
+    response.request().resourceType() === "document" && response.url() === expectedDocumentUrl
+  );
+  await page.evaluate((target) => { window.location.assign(target); }, url);
+  const response = await responsePromise;
+  await expect.poll(() => {
+    const current = new URL(page.url());
+    return `${current.origin}${current.pathname}${current.search}`;
+  }).toBe(expectedDocumentUrl);
+  return response;
+}
+
 async function createActivePair(browser: Browser, baseURL: string) {
   const creatorContext = await browser.newContext();
   await installWorkingClipboard(creatorContext);
@@ -35,12 +50,12 @@ async function createActivePair(browser: Browser, baseURL: string) {
   const creator = await creatorContext.newPage();
   const joiner = await joinerContext.newPage();
 
-  await creator.goto(baseURL, { waitUntil: "domcontentloaded" });
+  await navigateDocument(creator, baseURL);
   await creator.getByRole("button", { name: "Start" }).click();
   await expect(creator.getByText("Waiting for one person.")).toBeVisible();
   const invite = await creator.getByLabel("One-time conversation link").inputValue();
 
-  const inviteResponse = await joiner.goto(invite, { waitUntil: "commit" });
+  const inviteResponse = await navigateDocument(joiner, invite);
   expect(inviteResponse?.status()).toBe(200);
   await expect(creator.locator("#message")).toBeEnabled();
   await expect(joiner.locator("#message")).toBeEnabled();
@@ -62,6 +77,31 @@ async function waitForGone(page: Page): Promise<void> {
   await expect(page.locator("script")).toHaveCount(0);
   await expect(page.locator("style, link[rel='stylesheet'], [style]")).toHaveCount(0);
   await expect(page.locator("#root, main, div")).toHaveCount(0);
+}
+
+async function openGroupInvite(page: Page, invite: string): Promise<void> {
+  const expected = new URL(invite);
+  const inviteToken = expected.pathname.split("/").at(-1)!;
+  const linkSecret = new URLSearchParams(expected.hash.slice(1)).get("secret");
+  if (!linkSecret) throw new Error("Group invite is missing its fragment secret");
+  const tabToken = await page.evaluate(() => {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  });
+  await page.addInitScript(({ pathname, token, secret, tab }) => {
+    if (location.pathname !== pathname) return;
+    sessionStorage.setItem(`410.group.tab.v1.${token}`, tab);
+    sessionStorage.setItem("410.group.session.v1", JSON.stringify({
+      version: 1,
+      inviteToken: token,
+      linkSecret: secret,
+      expiresAt: Number.MAX_SAFE_INTEGER
+    }));
+  }, { pathname: expected.pathname, token: inviteToken, secret: linkSecret, tab: tabToken });
+  await navigateDocument(page, `${expected.origin}${expected.pathname}`);
 }
 
 async function sendMessages(page: Page, count: number, prefix: string): Promise<void> {
@@ -138,11 +178,13 @@ test("home is inert; Start creates exactly one room and copies its one-time link
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/rooms") creates += 1;
   });
 
-  await page.goto(baseURL!);
+  await navigateDocument(page, baseURL!);
   await expect(page.getByRole("heading", { name: "One link. Two people. Gone." })).toBeVisible();
   expect(await page.locator(".start-headline > span").allTextContents()).toEqual(["One link.", "Two people.", "Gone."]);
   await expect(page.getByText("A private conversation that exists once.", { exact: false })).toBeVisible();
-  await expect(page.getByText("E2E encrypted · 2 people · 30 minutes", { exact: true })).toBeVisible();
+  await expect(page.getByText("1-to-1 private chat · 30 minutes", { exact: true })).toBeVisible();
+  await expect(page.getByText("Experimental E2E · up to 10 people · 24 hours", { exact: true })).toBeVisible();
+  await expect(page.getByText("E2E encrypted · 2 people · 30 minutes", { exact: true })).toHaveCount(0);
   await expect(page.getByText("How it works", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Security →", exact: true })).toBeVisible();
   await expect(page.locator(".start-page a")).toHaveCount(1);
@@ -156,15 +198,16 @@ test("home is inert; Start creates exactly one room and copies its one-time link
     const logo = document.querySelector<HTMLElement>(".start-page .logo")!;
     const headline = document.querySelector<HTMLElement>(".start-headline")!;
     const intro = document.querySelector<HTMLElement>(".start-intro")!;
+    const actions = document.querySelector<HTMLElement>(".start-actions")!;
     const start = document.querySelector<HTMLElement>(".primary-action")!;
-    const technical = document.querySelector<HTMLElement>(".start-technical")!;
+    const descriptions = Array.from(document.querySelectorAll<HTMLElement>(".start-action p"));
     const security = document.querySelector<HTMLElement>(".start-security")!;
     const contentRect = content.getBoundingClientRect();
     const logoRect = logo.getBoundingClientRect();
     const headlineRect = headline.getBoundingClientRect();
     const introRect = intro.getBoundingClientRect();
+    const actionsRect = actions.getBoundingClientRect();
     const startRect = start.getBoundingClientRect();
-    const technicalRect = technical.getBoundingClientRect();
     const securityRect = security.getBoundingClientRect();
     const pageStyle = getComputedStyle(pageElement);
     const startStyle = getComputedStyle(start);
@@ -175,12 +218,13 @@ test("home is inert; Start creates exactly one room and copies its one-time link
       contentTextAlign: getComputedStyle(content).textAlign,
       logoTop: logoRect.top,
       logoHeadlineGap: headlineRect.top - logoRect.bottom,
-      leftEdges: [logoRect.left, headlineRect.left, introRect.left, startRect.left, technicalRect.left, securityRect.left],
+      leftEdges: [logoRect.left, headlineRect.left, introRect.left, startRect.left, ...descriptions.map((description) => description.getBoundingClientRect().left), securityRect.left],
       logoFontFamily: getComputedStyle(logo).fontFamily,
       headlineFontFamily: getComputedStyle(headline).fontFamily,
       logoSize: Number.parseFloat(getComputedStyle(logo).fontSize),
       headlineSize: Number.parseFloat(getComputedStyle(headline).fontSize),
-      technicalHeight: technicalRect.height,
+      descriptionHeights: descriptions.map((description) => description.getBoundingClientRect().height),
+      actionsSecurityGap: securityRect.top - actionsRect.bottom,
       background: pageStyle.backgroundColor,
       backgroundImage: pageStyle.backgroundImage,
       color: pageStyle.color,
@@ -207,7 +251,9 @@ test("home is inert; Start creates exactly one room and copies its one-time link
   expect(desktop.logoSize).toBeLessThanOrEqual(76);
   expect(desktop.headlineSize).toBeGreaterThanOrEqual(56);
   expect(desktop.headlineSize).toBeLessThanOrEqual(68);
-  expect(desktop.technicalHeight).toBeLessThan(30);
+  expect(desktop.descriptionHeights.every((height) => height < 44)).toBe(true);
+  expect(desktop.actionsSecurityGap).toBeGreaterThanOrEqual(20);
+  expect(desktop.actionsSecurityGap).toBeLessThanOrEqual(36);
   expect(desktop.background).toBe("rgb(255, 255, 255)");
   expect(desktop.backgroundImage).toBe("none");
   expect(desktop.color).toBe("rgb(0, 0, 0)");
@@ -223,7 +269,8 @@ test("home is inert; Start creates exactly one room and copies its one-time link
     const logo = document.querySelector<HTMLElement>(".start-page .logo")!;
     const headline = document.querySelector<HTMLElement>(".start-headline")!;
     const start = document.querySelector<HTMLElement>(".primary-action")!;
-    const technical = document.querySelector<HTMLElement>(".start-technical")!;
+    const descriptions = Array.from(document.querySelectorAll<HTMLElement>(".start-action p"));
+    const security = document.querySelector<HTMLElement>(".start-security")!;
     const contentRect = content.getBoundingClientRect();
     return {
       viewportWidth: innerWidth,
@@ -235,7 +282,8 @@ test("home is inert; Start creates exactly one room and copies its one-time link
       headlineRight: headline.getBoundingClientRect().right,
       buttonWidth: start.getBoundingClientRect().width,
       buttonRight: start.getBoundingClientRect().right,
-      technicalRight: technical.getBoundingClientRect().right
+      descriptionsRight: descriptions.map((description) => description.getBoundingClientRect().right),
+      securityRight: security.getBoundingClientRect().right
     };
   });
   expect(mobile.scrollWidth).toBeLessThanOrEqual(mobile.viewportWidth);
@@ -246,7 +294,8 @@ test("home is inert; Start creates exactly one room and copies its one-time link
   expect(mobile.headlineRight).toBeLessThanOrEqual(mobile.viewportWidth);
   expect(Math.abs(mobile.buttonWidth - mobile.contentWidth)).toBeLessThan(1);
   expect(mobile.buttonRight).toBeLessThanOrEqual(mobile.viewportWidth);
-  expect(mobile.technicalRight).toBeLessThanOrEqual(mobile.viewportWidth);
+  expect(mobile.descriptionsRight.every((right) => right <= mobile.viewportWidth)).toBe(true);
+  expect(mobile.securityRight).toBeLessThanOrEqual(mobile.viewportWidth);
   await page.waitForTimeout(250);
   expect(creates).toBe(0);
 
@@ -259,11 +308,36 @@ test("home is inert; Start creates exactly one room and copies its one-time link
   await context.close();
 });
 
+test("home keeps direct parameters scoped when experimental group rooms are disabled", async ({ browser, baseURL }) => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.route("**/api/features", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ groupRooms: false }) });
+  });
+  await navigateDocument(page, baseURL!);
+
+  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeVisible();
+  await expect(page.getByText("1-to-1 private chat · 30 minutes", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create a room", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Experimental E2E · up to 10 people · 24 hours", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("E2E encrypted · 2 people · 30 minutes", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Security →", exact: true })).toBeVisible();
+
+  const gap = await page.evaluate(() => {
+    const actions = document.querySelector<HTMLElement>(".start-actions")!.getBoundingClientRect();
+    const security = document.querySelector<HTMLElement>(".start-security")!.getBoundingClientRect();
+    return security.top - actions.bottom;
+  });
+  expect(gap).toBeGreaterThanOrEqual(20);
+  expect(gap).toBeLessThanOrEqual(36);
+  await context.close();
+});
+
 test("a denied Clipboard API leaves the invite visible and manually selectable", async ({ browser, baseURL }) => {
   const context = await browser.newContext();
   await installDeniedClipboard(context);
   const page = await context.newPage();
-  await page.goto(baseURL!);
+  await navigateDocument(page, baseURL!);
   await page.getByRole("button", { name: "Start" }).click();
   await expect(page.getByText("Clipboard access is unavailable. Copy the link manually.")).toBeVisible();
   await expect(page.getByLabel("One-time conversation link")).toHaveValue(/\/r\/[A-Za-z0-9_-]{43}#secret=/);
@@ -278,12 +352,7 @@ test("Waiting shows the exact existing invite as a local, accessible QR without 
   const observedRequests: string[] = [];
   page.on("request", (request) => observedRequests.push(request.url()));
 
-  await expect.poll(async () => {
-    const response = await page.request.get(`${baseURL}/__stats`);
-    return ((await response.json()) as { now: { waiting: number } }).now.waiting;
-  }).toBe(0);
-
-  await page.goto(baseURL!, { waitUntil: "load" });
+  await navigateDocument(page, baseURL!);
   await expect(page.getByRole("button", { name: "Show QR", exact: true })).toHaveCount(0);
   await expect(page.locator("[data-qr-value]")).toHaveCount(0);
 
@@ -300,7 +369,6 @@ test("Waiting shows the exact existing invite as a local, accessible QR without 
     now: { waiting: number; active: number };
     totals: { rooms_created: number };
   };
-  expect(statsBefore.now.waiting).toBe(1);
   const requestsBeforeShow = observedRequests.length;
 
   await showQr.click();
@@ -363,7 +431,7 @@ test("Waiting shows the exact existing invite as a local, accessible QR without 
   const joiner = await joinerContext.newPage();
   const joinerRequests: string[] = [];
   joiner.on("request", (request) => joinerRequests.push(request.url()));
-  const inviteResponse = await joiner.goto(invite, { waitUntil: "commit" });
+  const inviteResponse = await navigateDocument(joiner, invite);
   expect(inviteResponse?.status()).toBe(200);
   await expect(page.locator("#message")).toBeEnabled();
   await expect(joiner.locator("#message")).toBeEnabled();
@@ -389,7 +457,7 @@ test("Security modal links to a direct, refreshable, inert Security page", async
     if (request.method() === "POST" && new URL(request.url()).pathname === "/api/rooms") creates += 1;
   });
 
-  await page.goto(baseURL!, { waitUntil: "domcontentloaded" });
+  await navigateDocument(page, baseURL!);
   await page.getByRole("link", { name: "Security →", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Security" });
   await expect(dialog).toBeVisible();
@@ -482,7 +550,7 @@ test("Security modal links to a direct, refreshable, inert Security page", async
 
   const directContext = await browser.newContext();
   const directPage = await directContext.newPage();
-  const directResponse = await directPage.goto(`${baseURL}/security`, { waitUntil: "commit" });
+  const directResponse = await navigateDocument(directPage, `${baseURL}/security`);
   expect(directResponse?.status()).toBe(200);
   await expect(directPage.getByRole("heading", { level: 1, name: "Security", exact: true })).toBeVisible();
   await directPage.setViewportSize({ width: 390, height: 844 });
@@ -523,10 +591,13 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
     groups: { totals: Record<string, number> };
   };
 
-  await creator.goto(baseURL!, { waitUntil: "domcontentloaded" });
+  await navigateDocument(creator, baseURL!);
   await creator.getByRole("button", { name: "Create a room", exact: true }).click();
   await expect(creator).toHaveURL(/\/g\/[A-Za-z0-9_-]{43}$/);
   await expect(creator.getByText("1 person here", { exact: true })).toBeVisible();
+  await expect(creator.locator(".group-presence-event")).toHaveCount(0);
+  const creatorPersona = await creator.locator(".group-self-persona strong").textContent();
+  expect(creatorPersona).toBeTruthy();
   const inviteInput = creator.getByLabel("Reusable room link");
   await expect(inviteInput).toBeVisible();
   const invite = await inviteInput.inputValue();
@@ -549,24 +620,37 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
 
   const bContext = await browser.newContext();
   const b = await bContext.newPage();
-  expect((await b.goto(invite, { waitUntil: "commit" }))?.status()).toBe(200);
+  await openGroupInvite(b, invite);
   await expect(creator.getByText("2 people here", { exact: true })).toBeVisible();
   await expect(creator.locator("#group-message")).toBeEnabled();
   await expect(b.locator("#group-message")).toBeEnabled();
+  const bPersona = (await b.locator(".group-self-persona strong").textContent())!;
+  await expect(creator.getByText(`${bPersona} joined`, { exact: true })).toHaveCount(1);
+  await expect(b.locator(".group-presence-event")).toHaveCount(0);
 
-  await creator.locator("#group-message").fill("before third participant");
-  await creator.locator("#group-message").press("Enter");
+  const creatorComposer = creator.locator("#group-message");
+  await creator.bringToFront();
+  await creatorComposer.fill("before third participant");
+  await creatorComposer.press("Enter");
+  await expect(creatorComposer).toHaveValue("");
   await expect(b.getByText("before third participant", { exact: true })).toBeVisible();
+  await expect(b.locator(".group-message-author").filter({ hasText: creatorPersona! })).toBeVisible();
 
   const cContext = await browser.newContext();
   const c = await cContext.newPage();
-  expect((await c.goto(invite, { waitUntil: "commit" }))?.status()).toBe(200);
+  await openGroupInvite(c, invite);
   await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
   await expect(c.locator("#group-message")).toBeEnabled();
   await expect(c.getByText("before third participant", { exact: true })).toHaveCount(0);
+  const cPersona = (await c.locator(".group-self-persona strong").textContent())!;
+  await expect(creator.getByText(`${cPersona} joined`, { exact: true })).toHaveCount(1);
+  await expect(b.getByText(`${cPersona} joined`, { exact: true })).toHaveCount(1);
+  await expect(c.locator(".group-presence-event")).toHaveCount(0);
 
-  await creator.locator("#group-message").fill("after third participant");
-  await creator.locator("#group-message").press("Enter");
+  await creator.bringToFront();
+  await creatorComposer.fill("after third participant");
+  await creator.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(creatorComposer).toHaveValue("");
   await expect(b.getByText("after third participant", { exact: true })).toBeVisible();
   await expect(c.getByText("after third participant", { exact: true })).toBeVisible();
   expect(sentFrames.join("\n")).not.toContain("before third participant");
@@ -574,29 +658,71 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
 
   await cContext.close();
   await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
+  await creator.waitForTimeout(500);
+  await expect(creator.getByText(`${cPersona} left`, { exact: true })).toHaveCount(0);
   await expect(creator.getByText("2 people here", { exact: true })).toBeVisible({ timeout: 8_000 });
+  await expect(creator.getByText(`${cPersona} left`, { exact: true })).toHaveCount(1);
+  await expect(b.getByText(`${cPersona} left`, { exact: true })).toHaveCount(1);
 
   const rejoinContext = await browser.newContext();
   const rejoined = await rejoinContext.newPage();
-  expect((await rejoined.goto(invite, { waitUntil: "commit" }))?.status()).toBe(200);
+  await openGroupInvite(rejoined, invite);
   await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
   await expect(rejoined.locator("#group-message")).toBeEnabled();
   await expect(rejoined.locator(".message")).toHaveCount(0);
+  const rejoinedPersona = (await rejoined.locator(".group-self-persona strong").textContent())!;
+  await expect(creator.getByText(`${rejoinedPersona} joined`, { exact: true })).toHaveCount(1);
+  await expect(b.getByText(`${rejoinedPersona} joined`, { exact: true })).toHaveCount(1);
+  await expect(rejoined.locator(".group-presence-event")).toHaveCount(0);
   await b.locator("#group-message").fill("after rejoin only");
   await b.locator("#group-message").press("Enter");
   await expect(creator.getByText("after rejoin only", { exact: true })).toBeVisible();
   await expect(rejoined.getByText("after rejoin only", { exact: true })).toBeVisible();
 
+  const memberBeforeReload = await creator.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { memberId?: string } | null;
+    return session?.memberId;
+  });
+  await expect(b.getByText(`${creatorPersona} left`, { exact: true })).toHaveCount(0);
+  await expect(b.getByText(`${creatorPersona} joined`, { exact: true })).toHaveCount(0);
   await creator.reload({ waitUntil: "domcontentloaded" });
   await expect(creator.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
   await expect(creator.locator(".message")).toHaveCount(0);
+  await expect(creator.locator(".group-self-persona strong")).toHaveText(creatorPersona!);
+  const memberAfterReload = await creator.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { memberId?: string } | null;
+    return session?.memberId;
+  });
+  expect(memberAfterReload).toBeTruthy();
+  expect(memberAfterReload).not.toBe(memberBeforeReload);
+  await expect(b.getByText(`${creatorPersona} left`, { exact: true })).toHaveCount(0);
+  await expect(b.getByText(`${creatorPersona} joined`, { exact: true })).toHaveCount(0);
   await expect(creator.getByRole("button", { name: "Destroy room", exact: true })).toBeVisible();
 
   const after = await (await creator.request.get(`${baseURL}/__stats`)).json() as typeof before;
   expect(after.groups.totals.group_rooms_created - before.groups.totals.group_rooms_created).toBe(1);
-  expect(after.groups.totals.group_participants_joined - before.groups.totals.group_participants_joined).toBe(4);
+  expect(after.groups.totals.group_participants_joined - before.groups.totals.group_participants_joined).toBe(5);
   expect(after.groups.totals.group_conversations_started - before.groups.totals.group_conversations_started).toBe(1);
   expect(after.groups.totals.group_messages_relayed - before.groups.totals.group_messages_relayed).toBe(3);
+
+  await creator.evaluate(() => {
+    const originalSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function sendWithOneRelayFailure(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+      if (typeof data === "string" && data.includes('"type":"group_relay"')) {
+        WebSocket.prototype.send = originalSend;
+        throw new Error("simulated group relay send failure");
+      }
+      return originalSend.call(this, data);
+    };
+  });
+  await creatorComposer.fill("keep this failed message");
+  await creatorComposer.press("Enter");
+  await expect(creatorComposer).toHaveValue("keep this failed message");
+  await expect(creatorComposer).toBeDisabled();
+  await expect(creatorComposer).toBeEnabled({ timeout: 10_000 });
+  await expect(creatorComposer).toHaveValue("keep this failed message");
+  await expect(creatorComposer).not.toBeFocused();
+  await creatorComposer.fill("");
 
   await creator.getByRole("button", { name: "Destroy room", exact: true }).click();
   const confirm = creator.getByRole("dialog", { name: "Destroy this room?" });
@@ -621,7 +747,314 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
   await rejoinContext.close();
 });
 
-test("two contexts exchange E2E messages; consumed invite is HTTP 410; disconnect burns the room", async ({ browser, baseURL }) => {
+test("room personas persist per browser while tabs remain separate live participants", async ({ browser, baseURL }) => {
+  const context = await browser.newContext();
+  await installWorkingClipboard(context);
+  const primary = await context.newPage();
+  await navigateDocument(primary, baseURL!);
+  await primary.getByRole("button", { name: "Create a room", exact: true }).click();
+  await expect(primary.getByText("1 person here", { exact: true })).toBeVisible();
+  const invite = await primary.getByLabel("Reusable room link").inputValue();
+  const primaryName = (await primary.locator(".group-self-persona strong").textContent())!;
+  const primaryStyle = await primary.locator(".group-self-persona strong").getAttribute("style");
+  const owner = await primary.evaluate(() => {
+    return JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as {
+      roomId: string;
+      memberId: string;
+      ownerCapability: string;
+    };
+  });
+  const ownerRecoverySecret = await primary.evaluate(() => {
+    const entry = Object.entries(localStorage).find(([key]) => key.startsWith("410.group.owner-recovery.v1."));
+    return entry?.[1];
+  });
+  expect(ownerRecoverySecret).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(invite).not.toContain(ownerRecoverySecret!);
+  expect(await primary.evaluate((secret) => sessionStorage.getItem("410.group.session.v1")?.includes(secret) ?? false, ownerRecoverySecret!)).toBe(false);
+  await expect(primary.getByRole("button", { name: "Destroy room", exact: true })).toBeVisible();
+
+  const secondTab = await context.newPage();
+  await openGroupInvite(secondTab, invite);
+  await expect(secondTab.locator("#group-message")).toBeEnabled();
+  const secondName = (await secondTab.locator(".group-self-persona strong").textContent())!;
+  expect(secondName).not.toBe(primaryName);
+  await expect(secondTab.getByRole("button", { name: "Destroy room", exact: true })).toHaveCount(0);
+  await expect(primary.getByText(`${secondName} joined`, { exact: true })).toHaveCount(1);
+  await expect(secondTab.locator(".group-presence-event")).toHaveCount(0);
+
+  const thirdTab = await context.newPage();
+  await openGroupInvite(thirdTab, invite);
+  await expect(thirdTab.locator("#group-message")).toBeEnabled();
+  const thirdName = (await thirdTab.locator(".group-self-persona strong").textContent())!;
+  await expect(thirdTab.getByRole("button", { name: "Destroy room", exact: true })).toHaveCount(0);
+  await expect(primary.getByText(`${thirdName} joined`, { exact: true })).toHaveCount(1);
+  await expect(secondTab.getByText(`${thirdName} joined`, { exact: true })).toHaveCount(1);
+  await expect(thirdTab.locator(".group-presence-event")).toHaveCount(0);
+
+  const rejectedTab = await context.newPage();
+  await openGroupInvite(rejectedTab, invite);
+  await expect(rejectedTab.getByRole("heading", { name: "Too many sessions from this browser." })).toBeVisible();
+  await expect(primary.getByText("3 people here", { exact: true })).toBeVisible();
+
+  const otherContext = await browser.newContext();
+  const other = await otherContext.newPage();
+  await openGroupInvite(other, invite);
+  await expect(other.locator("#group-message")).toBeEnabled();
+  const otherName = (await other.locator(".group-self-persona strong").textContent())!;
+  await expect(other.getByRole("button", { name: "Destroy room", exact: true })).toHaveCount(0);
+  await expect(primary.getByText(`${otherName} joined`, { exact: true })).toHaveCount(1);
+  await expect(secondTab.getByText(`${otherName} joined`, { exact: true })).toHaveCount(1);
+  await expect(thirdTab.getByText(`${otherName} joined`, { exact: true })).toHaveCount(1);
+  await expect(other.locator(".group-presence-event")).toHaveCount(0);
+  const names = [primaryName, secondName, thirdName, otherName];
+  expect(new Set(names).size).toBe(4);
+  const styles = await Promise.all([primary, secondTab, thirdTab, other].map((page) =>
+    page.locator(".group-self-persona strong").getAttribute("style")
+  ));
+  expect(new Set(styles).size).toBe(4);
+
+  await primary.locator("#group-message").fill("persona-labelled message");
+  await primary.locator("#group-message").press("Enter");
+  await expect(other.getByText("persona-labelled message", { exact: true })).toBeVisible();
+  const author = other.locator(".group-message-author", { hasText: primaryName });
+  await expect(author).toBeVisible();
+  expect(await author.getAttribute("style")).toBe(primaryStyle);
+
+  const memberBeforeReload = owner.memberId;
+  await expect(other.getByText(`${primaryName} left`, { exact: true })).toHaveCount(0);
+  await expect(other.getByText(`${primaryName} joined`, { exact: true })).toHaveCount(0);
+  await primary.reload({ waitUntil: "domcontentloaded" });
+  await expect(primary.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
+  await expect(primary.locator(".group-self-persona strong")).toHaveText(primaryName);
+  await expect(primary.locator(".message")).toHaveCount(0);
+  const memberAfterReload = await primary.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { memberId?: string } | null;
+    return session?.memberId;
+  });
+  expect(memberAfterReload).not.toBe(memberBeforeReload);
+  await expect(other.getByText(`${primaryName} left`, { exact: true })).toHaveCount(0);
+  await expect(other.getByText(`${primaryName} joined`, { exact: true })).toHaveCount(0);
+
+  await primary.close();
+  const returnedPrimary = await context.newPage();
+  await openGroupInvite(returnedPrimary, invite);
+  await expect(returnedPrimary.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
+  await expect(returnedPrimary.locator(".group-self-persona strong")).toHaveText(primaryName);
+  await expect(returnedPrimary.locator(".message")).toHaveCount(0);
+  const returnedMemberId = await returnedPrimary.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { memberId?: string } | null;
+    return session?.memberId;
+  });
+  expect(returnedMemberId).not.toBe(memberAfterReload);
+  await expect(returnedPrimary.getByRole("button", { name: "Destroy room", exact: true })).toBeVisible();
+  const recoveredOwnerCapability = await returnedPrimary.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { ownerCapability?: string } | null;
+    return session?.ownerCapability;
+  });
+  expect(recoveredOwnerCapability).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(recoveredOwnerCapability).not.toBe(owner.ownerCapability);
+
+  await secondTab.close();
+  await expect(returnedPrimary.getByText("3 people here", { exact: true })).toBeVisible({ timeout: 8_000 });
+  await expect(returnedPrimary.getByText(`${secondName} left`, { exact: true })).toHaveCount(1);
+  const replacementEphemeral = await context.newPage();
+  await openGroupInvite(replacementEphemeral, invite);
+  await expect(replacementEphemeral.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
+  const replacementName = (await replacementEphemeral.locator(".group-self-persona strong").textContent())!;
+  expect(replacementName).not.toBe(secondName);
+  await expect(returnedPrimary.getByText(`${replacementName} joined`, { exact: true })).toHaveCount(1);
+  await expect(replacementEphemeral.locator(".group-presence-event")).toHaveCount(0);
+  await expect(replacementEphemeral.locator(".message")).toHaveCount(0);
+
+  const gone = returnedPrimary.waitForResponse((response) =>
+    response.status() === 410 && response.request().resourceType() === "document"
+  );
+  await returnedPrimary.evaluate(({ roomId, ownerCapability }) => {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${scheme}://${location.host}/group-ws`);
+    socket.addEventListener("open", () => socket.send(JSON.stringify({
+      type: "group_owner_destroy",
+      roomId,
+      ownerCapability
+    })));
+  }, { roomId: owner.roomId, ownerCapability: recoveredOwnerCapability! });
+  expect((await gone).status()).toBe(410);
+  await waitForGone(returnedPrimary);
+  expect(await returnedPrimary.evaluate(() =>
+    Object.keys(localStorage).some((key) => key.startsWith("410.group.browser.v1."))
+  )).toBe(false);
+  expect(await returnedPrimary.evaluate(() =>
+    Object.keys(localStorage).some((key) => key.startsWith("410.group.owner-recovery.v1."))
+  )).toBe(false);
+
+  await context.close();
+  await otherContext.close();
+});
+
+test("group transport resume inside grace does not emit presence noise", async ({ browser, baseURL }) => {
+  const creatorContext = await browser.newContext();
+  await installWorkingClipboard(creatorContext);
+  const participantContext = await browser.newContext();
+  await participantContext.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    const TrackedWebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).endsWith("/group-ws")) {
+          (window as Window & { __groupTestSocket?: WebSocket }).__groupTestSocket = socket;
+        }
+        return socket;
+      }
+    });
+    Object.defineProperty(window, "WebSocket", { configurable: true, value: TrackedWebSocket });
+  });
+  const creator = await creatorContext.newPage();
+  const participant = await participantContext.newPage();
+
+  await navigateDocument(creator, baseURL!);
+  await creator.getByRole("button", { name: "Create a room", exact: true }).click();
+  const invite = await creator.getByLabel("Reusable room link").inputValue();
+  await openGroupInvite(participant, invite);
+  await expect(creator.locator("#group-message")).toBeEnabled();
+  await expect(participant.locator("#group-message")).toBeEnabled();
+  const participantName = (await participant.locator(".group-self-persona strong").textContent())!;
+  await expect(creator.getByText(`${participantName} joined`, { exact: true })).toHaveCount(1);
+  const resumeTokenBefore = await participant.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { resumeToken?: string } | null;
+    return session?.resumeToken;
+  });
+
+  await participant.evaluate(() => {
+    (window as Window & { __groupTestSocket?: WebSocket }).__groupTestSocket?.close(4499, "test transport drop");
+  });
+  await participant.waitForTimeout(400);
+  await expect(creator.getByText(`${participantName} left`, { exact: true })).toHaveCount(0);
+  await expect.poll(async () => participant.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { resumeToken?: string } | null;
+    return session?.resumeToken;
+  }), { timeout: 10_000 }).not.toBe(resumeTokenBefore);
+  await expect(participant.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
+  await expect(creator.getByText("2 people here", { exact: true })).toBeVisible();
+  await expect(creator.getByText(`${participantName} joined`, { exact: true })).toHaveCount(1);
+  await expect(creator.getByText(`${participantName} left`, { exact: true })).toHaveCount(0);
+  await expect(participant.locator(".group-presence-event")).toHaveCount(0);
+
+  const creatorGone = creator.waitForResponse((response) =>
+    response.status() === 410 && response.request().resourceType() === "document"
+  );
+  const participantGone = participant.waitForResponse((response) =>
+    response.status() === 410 && response.request().resourceType() === "document"
+  );
+  await creator.getByRole("button", { name: "Destroy room", exact: true }).click();
+  await creator.getByRole("dialog", { name: "Destroy this room?" })
+    .getByRole("button", { name: "Destroy room", exact: true }).click();
+  expect((await creatorGone).status()).toBe(410);
+  expect((await participantGone).status()).toBe(410);
+  await waitForGone(creator);
+  await waitForGone(participant);
+
+  await creatorContext.close();
+  await participantContext.close();
+});
+
+test("group composer keeps focus after Enter and click Send", async ({ browser, baseURL }) => {
+  const context = await browser.newContext();
+  await installWorkingClipboard(context);
+  const creator = await context.newPage();
+  await navigateDocument(creator, baseURL!);
+  await creator.getByRole("button", { name: "Create a room", exact: true }).click();
+  const invite = await creator.getByLabel("Reusable room link").inputValue();
+
+  const peer = await context.newPage();
+  await openGroupInvite(peer, invite);
+  await expect(peer.locator("#group-message")).toBeEnabled();
+  await creator.bringToFront();
+
+  const composer = creator.locator("#group-message");
+  await composer.fill("sent with Enter");
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+  await expect(composer).toBeFocused();
+  await expect(peer.getByText("sent with Enter", { exact: true })).toBeVisible();
+
+  await composer.fill("sent with click");
+  await creator.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(composer).toHaveValue("");
+  await expect(composer).toBeFocused();
+  await expect(peer.getByText("sent with click", { exact: true })).toBeVisible();
+
+  const creatorGone = creator.waitForResponse((response) =>
+    response.status() === 410 && response.request().resourceType() === "document"
+  );
+  const peerGone = peer.waitForResponse((response) =>
+    response.status() === 410 && response.request().resourceType() === "document"
+  );
+  await creator.getByRole("button", { name: "Destroy room", exact: true }).click();
+  await creator.getByRole("dialog", { name: "Destroy this room?" })
+    .getByRole("button", { name: "Destroy room", exact: true }).click();
+  expect((await creatorGone).status()).toBe(410);
+  expect((await peerGone).status()).toBe(410);
+  await context.close();
+});
+
+test("Firefox accepts a real fragment invite, strips it, and exchanges an encrypted message", async ({ browser, browserName, baseURL }) => {
+  test.skip(browserName !== "firefox", "Firefox-specific fragment navigation smoke coverage");
+  const creatorContext = await browser.newContext();
+  await installWorkingClipboard(creatorContext);
+  const creator = await creatorContext.newPage();
+  await navigateDocument(creator, baseURL!);
+  await creator.getByRole("button", { name: "Create a room", exact: true }).click();
+  const invite = await creator.getByLabel("Reusable room link").inputValue();
+  expect(new URL(invite).hash).toMatch(/^#secret=[A-Za-z0-9_-]{43}$/);
+
+  const joinerContext = await browser.newContext();
+  const joiner = await joinerContext.newPage();
+  const inviteResponse = await navigateDocument(joiner, invite);
+  expect(inviteResponse?.status()).toBe(200);
+  await expect.poll(() => new URL(joiner.url()).hash, { timeout: 15_000 }).toBe("");
+  await expect(joiner.locator("#group-message")).toBeEnabled({ timeout: 15_000 });
+  await expect(creator.locator("#group-message")).toBeEnabled({ timeout: 15_000 });
+  await joiner.locator("#group-message").fill("real Firefox fragment flow");
+  await joiner.locator("#group-message").press("Enter");
+  await expect(creator.getByText("real Firefox fragment flow", { exact: true })).toBeVisible();
+
+  await creator.getByRole("button", { name: "Destroy room", exact: true }).click();
+  await creator.getByRole("dialog", { name: "Destroy this room?" })
+    .getByRole("button", { name: "Destroy room", exact: true }).click();
+  await waitForGone(creator);
+  await waitForGone(joiner);
+  await creatorContext.close();
+  await joinerContext.close();
+});
+
+test("Firefox shows the direct disconnect grace countdown in the foreground tab", async ({ browser, browserName, baseURL }) => {
+  test.skip(browserName !== "firefox", "Firefox-specific foreground disconnect coverage");
+  const context = await browser.newContext();
+  await installWorkingClipboard(context);
+  const creator = await context.newPage();
+  await navigateDocument(creator, baseURL!);
+  await creator.getByRole("button", { name: "Start" }).click();
+  const invite = await creator.getByLabel("One-time conversation link").inputValue();
+
+  const joiner = await context.newPage();
+  expect((await navigateDocument(joiner, invite)).status()).toBe(200);
+  await expect(creator.locator("#message")).toBeEnabled();
+  await expect(joiner.locator("#message")).toBeEnabled();
+  await creator.bringToFront();
+
+  const goneResponse = creator.waitForResponse((response) =>
+    response.status() === 410 && response.request().resourceType() === "document"
+  );
+  const closeJoiner = joiner.close();
+  await expect(creator.getByText("Connection lost.")).toBeVisible();
+  await expect(creator.getByText(/This conversation will be gone in 00:0[1-5]/)).toBeVisible();
+  await closeJoiner;
+  expect((await goneResponse).status()).toBe(410);
+  await waitForGone(creator);
+  await context.close();
+});
+
+test("two contexts exchange E2E messages; consumed invite is HTTP 410; disconnect burns the room", async ({ browser, browserName, baseURL }) => {
   const pair = await createActivePair(browser, baseURL!);
 
   await pair.creator.locator("#message").fill("hello from the creator browser");
@@ -642,9 +1075,13 @@ test("two contexts exchange E2E messages; consumed invite is HTTP 410; disconnec
   const goneResponse = pair.creator.waitForResponse((response) =>
     response.status() === 410 && response.request().resourceType() === "document"
   );
-  await pair.joinerContext.close();
-  await expect(pair.creator.getByText("Connection lost.")).toBeVisible();
-  await expect(pair.creator.getByText(/This conversation will be gone in 00:0[1-2]/)).toBeVisible();
+  await pair.creator.bringToFront();
+  const closeJoiner = pair.joinerContext.close();
+  if (browserName !== "firefox") {
+    await expect(pair.creator.getByText("Connection lost.")).toBeVisible();
+    await expect(pair.creator.getByText(/This conversation will be gone in 00:0[1-5]/)).toBeVisible();
+  }
+  await closeJoiner;
   expect((await goneResponse).status()).toBe(410);
   await waitForGone(pair.creator);
   await expect(pair.creator.getByText("hello from the joiner browser")).toHaveCount(0);

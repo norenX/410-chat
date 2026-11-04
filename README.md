@@ -45,7 +45,11 @@ The current group-room limits are:
 - rekey on join, final leave, and reconnect;
 - absolute 24-hour TTL from creation;
 - no server-side message history or replay;
-- a separate creator capability for early destruction.
+- a tab-scoped creator capability for early destruction, with a separate
+  room-scoped browser recovery secret for reclaiming creator control;
+- temporary server-assigned nicknames/colors, with one room-scoped primary
+  persona per browser and ephemeral personas for additional tabs;
+- at most three simultaneous live/grace tabs per browser token.
 
 See [docs/group-e2ee-v1.md](docs/group-e2ee-v1.md) for the exact experimental
 protocol, threat model, transcript encoding, and known limitations.
@@ -317,8 +321,10 @@ Other global counters include room destruction reasons and HTTP 410 responses.
 
 Experimental group-room counters are stored in a separate `groups` section so
 that historical one-to-one metrics keep their existing meaning. The compact
-`scripts/stats.sh` output intentionally remains focused on the established
-one-to-one counters.
+`scripts/stats.sh` output presents separate `DIRECT` and `GROUP` sections. Its
+group `people` value follows the live Room roster: a disconnected grace slot
+continues to count until its grace period expires, just as the presence count
+shown to Room participants does.
 
 The metrics file contains no user-level or conversation-level analytics.
 

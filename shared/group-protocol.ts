@@ -8,8 +8,39 @@ export interface GroupEpochDescriptor {
   members: string[];
 }
 
+export interface GroupPersona {
+  nickname: string;
+  color: string;
+}
+
+export interface GroupMemberPersona extends GroupPersona {
+  memberId: string;
+}
+
+export const GROUP_PERSONA_COLORS = [
+  "#9C2A2A",
+  "#7A4E00",
+  "#0A6B4F",
+  "#1C5D99",
+  "#6240A0",
+  "#A13A73",
+  "#2A6F73",
+  "#6B4F3A",
+  "#465E15",
+  "#8A3B12",
+  "#315B7D",
+  "#5A3F7A"
+] as const;
+
 export type GroupClientCommand =
-  | { type: "group_join"; inviteToken: string; ownerCapability?: string }
+  | {
+      type: "group_join";
+      inviteToken: string;
+      browserVerifier: string;
+      tabVerifier: string;
+      ownerCapability?: string;
+      ownerRecoverySecret?: string;
+    }
   | {
       type: "group_resume";
       roomId: string;
@@ -39,6 +70,7 @@ export type GroupServerEvent =
       memberId: string;
       resumeToken: string;
       ownerAuthorized: boolean;
+      ownerCapability?: string;
       state: "OPEN";
       phase: GroupRoomPhase;
       expiresAt: number;
@@ -46,9 +78,12 @@ export type GroupServerEvent =
       disconnectGraceMs: number;
       maxParticipants: number;
       presenceCount: number;
+      persona: GroupPersona;
+      personaKind: "primary" | "ephemeral";
+      personas: GroupMemberPersona[];
     } & GroupEpochDescriptor)
   | { type: "group_presence"; presenceCount: number }
-  | ({ type: "group_epoch"; phase: "REKEYING" } & GroupEpochDescriptor)
+  | ({ type: "group_epoch"; phase: "REKEYING"; personas: GroupMemberPersona[] } & GroupEpochDescriptor)
   | { type: "group_epoch_failed"; epoch: number; rosterDigest: string }
   | { type: "group_epoch_ready"; epoch: number; rosterDigest: string; epochDigest: string }
   | { type: "group_control"; epoch: number; rosterDigest: string; from: string; data: string }
@@ -58,6 +93,7 @@ export type GroupServerEvent =
   | { type: "group_destroyed" }
   | { type: "group_room_gone"; message: string }
   | { type: "group_room_full"; maxParticipants: number }
+  | { type: "group_browser_limit"; maxSessions: number }
   | { type: "group_rate_limited" }
   | { type: "group_forbidden" }
   | { type: "group_protocol_error"; code: GroupProtocolErrorCode };
