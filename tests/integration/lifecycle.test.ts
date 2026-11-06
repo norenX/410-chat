@@ -85,6 +85,15 @@ describe("410 lifecycle", () => {
     expect(afterSecurity.now).toEqual({ waiting: 0, active: 0 });
     expect(server.manager.stats().activeRooms).toBe(0);
 
+    const howItWorks = await fetch(`${httpUrl}/how-it-works`);
+    expect(howItWorks.status).toBe(200);
+    expect(howItWorks.headers.get("cache-control")).toBe("no-store");
+    expect(await howItWorks.text()).toContain('<div id="root"></div>');
+    const afterHowItWorks = (await getStats(httpUrl)).stats;
+    expect(afterHowItWorks.totals).toEqual(afterSecurity.totals);
+    expect(afterHowItWorks.now).toEqual({ waiting: 0, active: 0 });
+    expect(server.manager.stats().activeRooms).toBe(0);
+
     const adminPage = await fetch(`${httpUrl}/admin/stats`);
     expect(adminPage.status).toBe(200);
     expect(adminPage.headers.get("cache-control")).toBe("no-store");

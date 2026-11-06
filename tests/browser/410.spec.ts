@@ -288,6 +288,60 @@ test("admin stats polls aggregate direct and group counters without losing the l
   expect(after.groups.totals).toEqual(before.groups.totals);
 });
 
+test("How it works is a direct, concise, mobile-safe product guide with working navigation", async ({ page, baseURL }) => {
+  await navigateDocument(page, baseURL!);
+  const howLink = page.getByRole("link", { name: "How it works →", exact: true });
+  await expect(howLink).toHaveAttribute("href", "/how-it-works");
+
+  const howResponsePromise = page.waitForResponse((response) =>
+    response.request().resourceType() === "document" && new URL(response.url()).pathname === "/how-it-works"
+  );
+  await howLink.click();
+  expect((await howResponsePromise).status()).toBe(200);
+  await expect(page).toHaveURL(`${baseURL}/how-it-works`);
+  await expect(page).toHaveTitle("How it works — 410");
+  await expect(page.getByRole("heading", { level: 1, name: "How it works", exact: true })).toBeVisible();
+  expect(await page.locator(".how-document h2").allTextContents()).toEqual([
+    "1-TO-1",
+    "ROOM",
+    "NO HISTORY",
+    "GONE"
+  ]);
+  await expect(page.getByText("410 is temporary by design.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Once the second person joins, the invite cannot be used again.", { exact: true })).toBeVisible();
+  await expect(page.getByText("People can leave and come back while the room still exists.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Reloading or rejoining does not bring old messages back.", { exact: true })).toBeVisible();
+  await expect(page.getByText("410 Gone", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Security →", exact: true })).toHaveAttribute("href", "/security");
+  await expect(page.getByRole("link", { name: "Back →", exact: true })).toHaveAttribute("href", "/");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobile = await page.evaluate(() => {
+    const documentElement = document.querySelector<HTMLElement>(".how-document")!;
+    const rect = documentElement.getBoundingClientRect();
+    return {
+      viewportWidth: innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      contentLeft: rect.left,
+      contentRight: rect.right
+    };
+  });
+  expect(mobile.scrollWidth).toBeLessThanOrEqual(mobile.viewportWidth);
+  expect(mobile.contentLeft).toBeGreaterThanOrEqual(20);
+  expect(mobile.contentRight).toBeLessThanOrEqual(mobile.viewportWidth - 20);
+
+  await page.getByRole("link", { name: "Back →", exact: true }).click();
+  await expect(page).toHaveURL(baseURL!);
+  await expect(page.getByRole("button", { name: "Start", exact: true })).toBeVisible();
+
+  await page.getByRole("link", { name: "How it works →", exact: true }).click();
+  await page.getByRole("link", { name: "Security →", exact: true }).click();
+  await expect(page).toHaveURL(`${baseURL}/security`);
+  await expect(page.getByRole("heading", { level: 1, name: "Security", exact: true })).toBeVisible();
+
+  expect((await page.request.get(`${baseURL}/admin/stats`)).status()).toBe(200);
+});
+
 test("home is inert; Start creates exactly one room and copies its one-time link", async ({ browser, baseURL }) => {
   const context = await browser.newContext();
   await installWorkingClipboard(context);
@@ -305,12 +359,13 @@ test("home is inert; Start creates exactly one room and copies its one-time link
   await expect(page.getByText("1-to-1 private chat · 30 minutes", { exact: true })).toBeVisible();
   await expect(page.getByText("Experimental E2E · up to 10 people · 24 hours", { exact: true })).toBeVisible();
   await expect(page.getByText("E2E encrypted · 2 people · 30 minutes", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("How it works", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "How it works →", exact: true })).toHaveAttribute("href", "/how-it-works");
   await expect(page.getByRole("link", { name: "Security →", exact: true })).toBeVisible();
-  await expect(page.locator(".start-page a")).toHaveCount(1);
+  await expect(page.locator(".start-page a")).toHaveCount(2);
   await expect(page.getByRole("button", { name: "Create a room", exact: true })).toBeVisible();
   await expect(page.locator(".start-page button")).toHaveCount(2);
-  await expect(page.locator(".start-page nav, .start-page footer, .start-page article")).toHaveCount(0);
+  await expect(page.locator(".start-page nav")).toHaveCount(1);
+  await expect(page.locator(".start-page footer, .start-page article")).toHaveCount(0);
 
   const desktop = await page.evaluate(() => {
     const pageElement = document.querySelector<HTMLElement>(".start-page")!;
@@ -321,14 +376,14 @@ test("home is inert; Start creates exactly one room and copies its one-time link
     const actions = document.querySelector<HTMLElement>(".start-actions")!;
     const start = document.querySelector<HTMLElement>(".primary-action")!;
     const descriptions = Array.from(document.querySelectorAll<HTMLElement>(".start-action p"));
-    const security = document.querySelector<HTMLElement>(".start-security")!;
+    const information = document.querySelector<HTMLElement>(".start-information-links")!;
     const contentRect = content.getBoundingClientRect();
     const logoRect = logo.getBoundingClientRect();
     const headlineRect = headline.getBoundingClientRect();
     const introRect = intro.getBoundingClientRect();
     const actionsRect = actions.getBoundingClientRect();
     const startRect = start.getBoundingClientRect();
-    const securityRect = security.getBoundingClientRect();
+    const informationRect = information.getBoundingClientRect();
     const pageStyle = getComputedStyle(pageElement);
     const startStyle = getComputedStyle(start);
     return {
@@ -338,13 +393,13 @@ test("home is inert; Start creates exactly one room and copies its one-time link
       contentTextAlign: getComputedStyle(content).textAlign,
       logoTop: logoRect.top,
       logoHeadlineGap: headlineRect.top - logoRect.bottom,
-      leftEdges: [logoRect.left, headlineRect.left, introRect.left, startRect.left, ...descriptions.map((description) => description.getBoundingClientRect().left), securityRect.left],
+      leftEdges: [logoRect.left, headlineRect.left, introRect.left, startRect.left, ...descriptions.map((description) => description.getBoundingClientRect().left), informationRect.left],
       logoFontFamily: getComputedStyle(logo).fontFamily,
       headlineFontFamily: getComputedStyle(headline).fontFamily,
       logoSize: Number.parseFloat(getComputedStyle(logo).fontSize),
       headlineSize: Number.parseFloat(getComputedStyle(headline).fontSize),
       descriptionHeights: descriptions.map((description) => description.getBoundingClientRect().height),
-      actionsSecurityGap: securityRect.top - actionsRect.bottom,
+      actionsSecurityGap: informationRect.top - actionsRect.bottom,
       background: pageStyle.backgroundColor,
       backgroundImage: pageStyle.backgroundImage,
       color: pageStyle.color,
@@ -390,6 +445,7 @@ test("home is inert; Start creates exactly one room and copies its one-time link
     const headline = document.querySelector<HTMLElement>(".start-headline")!;
     const start = document.querySelector<HTMLElement>(".primary-action")!;
     const descriptions = Array.from(document.querySelectorAll<HTMLElement>(".start-action p"));
+    const information = document.querySelector<HTMLElement>(".start-information-links")!;
     const security = document.querySelector<HTMLElement>(".start-security")!;
     const contentRect = content.getBoundingClientRect();
     return {
@@ -403,6 +459,7 @@ test("home is inert; Start creates exactly one room and copies its one-time link
       buttonWidth: start.getBoundingClientRect().width,
       buttonRight: start.getBoundingClientRect().right,
       descriptionsRight: descriptions.map((description) => description.getBoundingClientRect().right),
+      informationRight: information.getBoundingClientRect().right,
       securityRight: security.getBoundingClientRect().right
     };
   });
@@ -415,6 +472,7 @@ test("home is inert; Start creates exactly one room and copies its one-time link
   expect(Math.abs(mobile.buttonWidth - mobile.contentWidth)).toBeLessThan(1);
   expect(mobile.buttonRight).toBeLessThanOrEqual(mobile.viewportWidth);
   expect(mobile.descriptionsRight.every((right) => right <= mobile.viewportWidth)).toBe(true);
+  expect(mobile.informationRight).toBeLessThanOrEqual(mobile.viewportWidth);
   expect(mobile.securityRight).toBeLessThanOrEqual(mobile.viewportWidth);
   await page.waitForTimeout(250);
   expect(creates).toBe(0);
@@ -441,12 +499,13 @@ test("home keeps direct parameters scoped when experimental group rooms are disa
   await expect(page.getByRole("button", { name: "Create a room", exact: true })).toHaveCount(0);
   await expect(page.getByText("Experimental E2E · up to 10 people · 24 hours", { exact: true })).toHaveCount(0);
   await expect(page.getByText("E2E encrypted · 2 people · 30 minutes", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "How it works →", exact: true })).toHaveAttribute("href", "/how-it-works");
   await expect(page.getByRole("link", { name: "Security →", exact: true })).toBeVisible();
 
   const gap = await page.evaluate(() => {
     const actions = document.querySelector<HTMLElement>(".start-actions")!.getBoundingClientRect();
-    const security = document.querySelector<HTMLElement>(".start-security")!.getBoundingClientRect();
-    return security.top - actions.bottom;
+    const information = document.querySelector<HTMLElement>(".start-information-links")!.getBoundingClientRect();
+    return information.top - actions.bottom;
   });
   expect(gap).toBeGreaterThanOrEqual(20);
   expect(gap).toBeLessThanOrEqual(36);

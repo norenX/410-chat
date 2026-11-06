@@ -3,6 +3,7 @@ import type { ClientCommand, Role, ServerEvent } from "../../shared/protocol.js"
 import { CryptoSession, createLinkSecret, sodiumReady, type DecryptedMessage } from "./crypto-session";
 import { AdminStatsPage } from "./AdminStatsPage";
 import { GroupRoomApp, storeCreatedGroup } from "./GroupRoomApp";
+import { HowItWorksPage } from "./HowItWorksPage";
 import { QrInviteDialog } from "./QrInviteDialog";
 
 type View = "loading" | "landing" | "security" | "creating" | "connecting" | "waiting" | "handshaking" | "active" | "reconnecting";
@@ -129,6 +130,7 @@ async function copyText(value: string): Promise<boolean> {
 
 export function App() {
   if (window.location.pathname === "/admin/stats") return <AdminStatsPage />;
+  if (window.location.pathname === "/how-it-works") return <HowItWorksPage />;
   if (GROUP_INVITE_PATH.test(window.location.pathname)) return <GroupRoomApp />;
   return <DirectChatApp />;
 }
@@ -631,7 +633,10 @@ function DirectChatApp() {
             )}
           </div>
           {notice && <p className="error-text" role="status">{notice}</p>}
-          <SecurityLink onOpen={() => setInfoPanel("security")} />
+          <nav className="start-information-links" aria-label="Information">
+            <a href="/how-it-works">How it works →</a>
+            <SecurityLink onOpen={() => setInfoPanel("security")} />
+          </nav>
         </section>
         <InfoDialog panel={infoPanel} onClose={() => setInfoPanel(null)} />
       </main>

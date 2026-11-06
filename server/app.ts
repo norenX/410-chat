@@ -360,6 +360,7 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
       return;
     }
     const servesApp = url.pathname === "/" || url.pathname === "/security" ||
+      url.pathname === "/how-it-works" ||
       url.pathname === "/admin/stats" ||
       Boolean(inviteMatch) || Boolean(groupInviteMatch);
 

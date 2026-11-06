@@ -137,15 +137,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   color: #333;
 }
 
-.start-security {
-  display: inline-block;
+.start-information-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
   margin-top: 28px;
+}
+
+.start-information-links a {
   color: #000;
   font-size: 15px;
   text-decoration: none;
 }
 
-.start-security:hover { text-decoration: underline; text-underline-offset: 4px; }
+.start-information-links a:hover { text-decoration: underline; text-underline-offset: 4px; }
 
 .security-page {
   min-height: 100vh;
@@ -233,6 +238,80 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 }
 
 .security-document section p:last-child { margin-bottom: 0; }
+
+.how-page {
+  min-height: 100vh;
+  padding: 72px 24px 96px;
+  background: #fff;
+  color: #111;
+}
+
+.how-document {
+  width: min(100%, 640px);
+  margin: 0 auto;
+}
+
+.how-header { margin-bottom: 72px; }
+
+.how-document h1 {
+  margin: 0;
+  font-size: clamp(40px, 6vw, 52px);
+  line-height: 1.05;
+  letter-spacing: -.045em;
+  font-weight: 640;
+}
+
+.how-introduction {
+  margin: 24px 0 0;
+  color: #3f3f3f;
+  font-size: 17px;
+  line-height: 1.65;
+}
+
+.how-document section { margin-top: 52px; }
+
+.how-document h2 {
+  margin: 0 0 18px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
+  line-height: 1.35;
+  letter-spacing: .08em;
+  font-weight: 700;
+}
+
+.how-document section p {
+  margin: 0 0 14px;
+  color: #3f3f3f;
+  font-size: 15px;
+  line-height: 1.72;
+}
+
+.how-document section p:last-child { margin-bottom: 0; }
+
+.how-document .how-gone-status {
+  margin: 20px 0;
+  color: #111;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.how-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  margin-top: 64px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+.how-links a {
+  color: #111;
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.how-links a:hover { text-decoration: underline; text-underline-offset: 4px; }
 
 .admin-stats-page {
   min-height: 100vh;
@@ -870,6 +949,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .security-page { padding: 44px 24px 64px; }
   .security-header { margin-bottom: 56px; }
   .security-document section { margin-top: 48px; }
+  .how-page { padding: 44px 24px 64px; }
+  .how-header { margin-bottom: 56px; }
+  .how-document section { margin-top: 44px; }
+  .how-links { margin-top: 52px; }
   .admin-stats-page { padding: 36px 22px 52px; }
   .admin-stats-header { padding-bottom: 22px; }
   .admin-stats-periods { grid-template-columns: 1fr; gap: 26px; }
