@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClientCommand, Role, ServerEvent } from "../../shared/protocol.js";
 import { CryptoSession, createLinkSecret, sodiumReady, type DecryptedMessage } from "./crypto-session";
+import { AdminStatsPage } from "./AdminStatsPage";
 import { GroupRoomApp, storeCreatedGroup } from "./GroupRoomApp";
 import { QrInviteDialog } from "./QrInviteDialog";
 
@@ -127,6 +128,7 @@ async function copyText(value: string): Promise<boolean> {
 }
 
 export function App() {
+  if (window.location.pathname === "/admin/stats") return <AdminStatsPage />;
   if (GROUP_INVITE_PATH.test(window.location.pathname)) return <GroupRoomApp />;
   return <DirectChatApp />;
 }

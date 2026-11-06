@@ -234,6 +234,110 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 
 .security-document section p:last-child { margin-bottom: 0; }
 
+.admin-stats-page {
+  min-height: 100vh;
+  padding: 56px 28px 72px;
+  background: #fff;
+  color: #111;
+}
+
+.admin-stats-shell {
+  width: min(100%, 840px);
+  margin: 0 auto;
+}
+
+.admin-stats-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid var(--line);
+}
+
+.admin-stats-header h1 {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: clamp(24px, 4vw, 32px);
+  line-height: 1;
+  letter-spacing: -.045em;
+}
+
+.admin-live-state {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: .08em;
+  white-space: nowrap;
+}
+
+.admin-live-state span { color: #8a8a8a; }
+.admin-live-state.is-live span { color: #32724b; }
+
+.admin-stats-section { margin-top: 48px; }
+
+.admin-stats-section > h2 {
+  margin: 0 0 20px;
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: .12em;
+}
+
+.admin-stats-periods {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 34px;
+}
+
+.admin-stats-period {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.admin-stats-period h3 {
+  margin: 0 0 14px;
+  color: var(--quiet);
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 650;
+  letter-spacing: .1em;
+}
+
+.admin-stats-values { margin: 0; }
+
+.admin-stats-values > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: baseline;
+  padding: 4px 0;
+}
+
+.admin-stats-values dt {
+  color: #444;
+  font-size: 14px;
+}
+
+.admin-stats-values dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-stats-empty {
+  margin: 64px 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.admin-stats-updated {
+  margin-top: 52px;
+  color: var(--quiet);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .logo {
   margin: 0 0 54px;
   font-size: 19px;
@@ -766,6 +870,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .security-page { padding: 44px 24px 64px; }
   .security-header { margin-bottom: 56px; }
   .security-document section { margin-top: 48px; }
+  .admin-stats-page { padding: 36px 22px 52px; }
+  .admin-stats-header { padding-bottom: 22px; }
+  .admin-stats-periods { grid-template-columns: 1fr; gap: 26px; }
+  .admin-stats-section { margin-top: 40px; }
+  .admin-stats-updated { margin-top: 44px; }
   .logo { margin-bottom: 46px; }
   .waiting-content .logo { margin-bottom: 54px; }
   .facts { line-height: 1.6; }

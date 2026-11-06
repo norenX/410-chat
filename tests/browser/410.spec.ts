@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import type { AdminStatsSnapshot } from "../../shared/admin-stats.js";
 
 type ClipboardWindow = Window & { __copiedInvite?: string };
 
@@ -167,6 +168,125 @@ function expectViewportLocked(metrics: Awaited<ReturnType<typeof conversationMet
   expect(metrics.messages.scrollHeight).toBeGreaterThan(metrics.messages.clientHeight);
   expect(metrics.messages.scrollWidth).toBeLessThanOrEqual(metrics.messages.clientWidth + 1);
 }
+
+test("admin stats polls aggregate direct and group counters without losing the last snapshot", async ({ page, baseURL }) => {
+  const before = await (await page.request.get(`${baseURL}/__stats`)).json() as {
+    today: Record<string, number>;
+    totals: Record<string, number>;
+    groups: { today: Record<string, number>; totals: Record<string, number> };
+  };
+  let requestCount = 0;
+  let failRequests = false;
+  let payload: AdminStatsSnapshot = {
+    direct: {
+      now: { waiting: 2, active: 1 },
+      today: {
+        homepage_views: 12,
+        rooms_created: 3,
+        conversations_started: 2,
+        messages_relayed: 7,
+        responses_410: 4
+      },
+      totals: {
+        homepage_views: 120,
+        rooms_created: 30,
+        conversations_started: 20,
+        messages_relayed: 70,
+        responses_410: 40
+      }
+    },
+    group: {
+      now: { rooms: 1, people: 4 },
+      today: {
+        group_rooms_created: 2,
+        group_participants_joined: 6,
+        group_messages_relayed: 8,
+        group_responses_410: 3
+      },
+      totals: {
+        group_rooms_created: 9,
+        group_participants_joined: 22,
+        group_messages_relayed: 44,
+        group_responses_410: 11
+      }
+    }
+  };
+
+  await page.route("**/admin/api/stats", async (route) => {
+    requestCount += 1;
+    if (failRequests) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: '{"error":"unavailable"}' });
+      return;
+    }
+    await route.fulfill({ json: payload });
+  });
+
+  expect((await navigateDocument(page, `${baseURL}/admin/stats`)).status()).toBe(200);
+  await expect(page.getByRole("heading", { level: 1, name: "410.chat stats" })).toBeVisible();
+  const direct = page.getByRole("region", { name: "DIRECT" });
+  const group = page.getByRole("region", { name: "GROUP" });
+  await expect(direct).toBeVisible();
+  await expect(group).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("LIVE");
+  await expect(page.getByText(/Updated \d{2}:\d{2}:\d{2}/)).toBeVisible();
+  await expect(direct.locator(".admin-stats-period").nth(0).locator("dd")).toHaveText(["2", "1"]);
+  await expect(direct.locator(".admin-stats-period").nth(1).locator("dd")).toHaveText(["12", "3", "2", "7", "4"]);
+  await expect(direct.locator(".admin-stats-period").nth(2).locator("dd")).toHaveText(["120", "30", "20", "70", "40"]);
+  await expect(group.locator(".admin-stats-period").nth(0).locator("dd")).toHaveText(["1", "4"]);
+  await expect(group.locator(".admin-stats-period").nth(1).locator("dd")).toHaveText(["2", "6", "8", "3"]);
+  await expect(group.locator(".admin-stats-period").nth(2).locator("dd")).toHaveText(["9", "22", "44", "11"]);
+
+  payload = {
+    ...payload,
+    direct: {
+      ...payload.direct,
+      today: { ...payload.direct.today, homepage_views: 13 }
+    },
+    group: {
+      ...payload.group,
+      today: { ...payload.group.today, group_participants_joined: 7 }
+    }
+  };
+  await expect.poll(() => requestCount, { timeout: 7000 }).toBeGreaterThanOrEqual(2);
+  await expect(direct.locator(".admin-stats-period").nth(1).locator("dd").first()).toHaveText("13");
+  await expect(group.locator(".admin-stats-period").nth(1).locator("dd").nth(1)).toHaveText("7");
+
+  failRequests = true;
+  await expect.poll(() => requestCount, { timeout: 7000 }).toBeGreaterThanOrEqual(3);
+  await expect(page.getByRole("status")).toContainText("UPDATE FAILED");
+  await expect(direct.locator(".admin-stats-period").nth(1).locator("dd").first()).toHaveText("13");
+  await expect(group.locator(".admin-stats-period").nth(1).locator("dd").nth(1)).toHaveText("7");
+
+  failRequests = false;
+  payload = {
+    ...payload,
+    direct: {
+      ...payload.direct,
+      today: { ...payload.direct.today, homepage_views: 14 }
+    }
+  };
+  await expect.poll(() => requestCount, { timeout: 7000 }).toBeGreaterThanOrEqual(4);
+  await expect(page.getByRole("status")).toContainText("LIVE");
+  await expect(direct.locator(".admin-stats-period").nth(1).locator("dd").first()).toHaveText("14");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobile = await page.evaluate(() => ({
+    viewportWidth: innerWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+    periodColumns: getComputedStyle(document.querySelector<HTMLElement>(".admin-stats-periods")!).gridTemplateColumns,
+    contentLeft: document.querySelector<HTMLElement>(".admin-stats-shell")!.getBoundingClientRect().left
+  }));
+  expect(mobile.scrollWidth).toBeLessThanOrEqual(mobile.viewportWidth);
+  expect(mobile.periodColumns.split(" ")).toHaveLength(1);
+  expect(mobile.contentLeft).toBeGreaterThanOrEqual(20);
+  await expect(page.locator("a, button")).toHaveCount(0);
+
+  const after = await (await page.request.get(`${baseURL}/__stats`)).json() as typeof before;
+  expect(after.today).toEqual(before.today);
+  expect(after.totals).toEqual(before.totals);
+  expect(after.groups.today).toEqual(before.groups.today);
+  expect(after.groups.totals).toEqual(before.groups.totals);
+});
 
 test("home is inert; Start creates exactly one room and copies its one-time link", async ({ browser, baseURL }) => {
   const context = await browser.newContext();

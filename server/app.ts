@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, join, normalize } from "node:path";
 import { WebSocketServer } from "ws";
 import type { ViteDevServer } from "vite";
+import { adminStatsSnapshot } from "./admin-stats.js";
 import type { ChatConfig } from "./config.js";
 import { MetricsStore, type MetricName } from "./metrics.js";
 import { normalizeTrafficSource, trafficSourceFromPageRequest } from "./attribution.js";
@@ -85,6 +86,7 @@ function applySecurityHeaders(response: ServerResponse, path: string): void {
   response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
   response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
   response.setHeader("Cache-Control", path.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-store");
+  if (path.startsWith("/admin/")) response.setHeader("X-Robots-Tag", "noindex, nofollow");
 }
 
 function json(response: ServerResponse, status: number, value: unknown): void {
@@ -236,6 +238,15 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
   const distRoot = join(process.cwd(), "dist-client");
   let vite: ViteDevServer | undefined;
 
+  function currentMetricsSnapshot() {
+    const groupCounts = groupManager.currentCounts();
+    return metrics.snapshot(
+      manager.currentCounts(),
+      Date.now(),
+      { rooms: groupCounts.rooms, participants: groupCounts.participants }
+    );
+  }
+
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     applySecurityHeaders(response, url.pathname);
@@ -258,12 +269,12 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
     }
 
     if (request.method === "GET" && url.pathname === "/__stats") {
-      const groupCounts = groupManager.currentCounts();
-      json(response, 200, metrics.snapshot(
-        manager.currentCounts(),
-        Date.now(),
-        { rooms: groupCounts.rooms, participants: groupCounts.participants }
-      ));
+      json(response, 200, currentMetricsSnapshot());
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/admin/api/stats") {
+      json(response, 200, adminStatsSnapshot(currentMetricsSnapshot()));
       return;
     }
 
@@ -349,6 +360,7 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
       return;
     }
     const servesApp = url.pathname === "/" || url.pathname === "/security" ||
+      url.pathname === "/admin/stats" ||
       Boolean(inviteMatch) || Boolean(groupInviteMatch);
 
     if (vite) {

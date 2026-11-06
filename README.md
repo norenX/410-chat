@@ -326,6 +326,19 @@ group `people` value follows the live Room roster: a disconnected grace slot
 continues to count until its grace period expires, just as the presence count
 shown to Room participants does.
 
+`GET /admin/stats` serves a compact live view of the same aggregate snapshot.
+The page polls `GET /admin/api/stats` every five seconds. The browser endpoint
+is a minimal projection containing only the DIRECT/GROUP counters displayed by
+`scripts/stats.sh`; it excludes process diagnostics, source attribution and all
+conversation-level data. Loading or polling the admin page does not increment
+`homepage_views` or any conversation counter.
+
+The application does not implement admin credentials. In a production setup,
+protect both the page and its JSON endpoint at the reverse proxy with one
+`/admin/*` matcher. Do not store Basic Auth credentials in this repository.
+The existing `GET /__stats`, `STATS_URL` override and `scripts/stats.sh` output
+remain unchanged.
+
 The metrics file contains no user-level or conversation-level analytics.
 
 Docker Compose persists the metrics file in a named volume mounted at `/data`.

@@ -944,6 +944,12 @@ describe("experimental group room lifecycle", () => {
     expect(stats.groups.totals).toEqual(
       Object.fromEntries(GROUP_METRIC_NAMES.map((name) => [name, 0]))
     );
+    const adminStats = await (await fetch(`${httpUrl}/admin/api/stats`)).json() as {
+      group: { now: { rooms: number; people: number }; today: Record<string, number>; totals: Record<string, number> };
+    };
+    expect(adminStats.group.now).toEqual({ rooms: 0, people: 0 });
+    expect(Object.values(adminStats.group.today)).toEqual([0, 0, 0, 0]);
+    expect(Object.values(adminStats.group.totals)).toEqual([0, 0, 0, 0]);
     expect((await fetch(`${httpUrl}/g/${token()}`)).status).toBe(410);
     expect(await (await fetch(`${httpUrl}/api/features`)).json()).toEqual({ groupRooms: false });
   });

@@ -85,6 +85,56 @@ describe("410 lifecycle", () => {
     expect(afterSecurity.now).toEqual({ waiting: 0, active: 0 });
     expect(server.manager.stats().activeRooms).toBe(0);
 
+    const adminPage = await fetch(`${httpUrl}/admin/stats`);
+    expect(adminPage.status).toBe(200);
+    expect(adminPage.headers.get("cache-control")).toBe("no-store");
+    expect(adminPage.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(await adminPage.text()).toContain('<div id="root"></div>');
+
+    const adminResponse = await fetch(`${httpUrl}/admin/api/stats`);
+    expect(adminResponse.status).toBe(200);
+    expect(adminResponse.headers.get("cache-control")).toBe("no-store");
+    expect(adminResponse.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    const adminStats = await adminResponse.json() as Record<string, Record<string, unknown>>;
+    expect(Object.keys(adminStats)).toEqual(["direct", "group"]);
+    expect(adminStats.direct).toEqual({
+      now: afterSecurity.now,
+      today: {
+        homepage_views: afterSecurity.today.homepage_views,
+        rooms_created: afterSecurity.today.rooms_created,
+        conversations_started: afterSecurity.today.conversations_started,
+        messages_relayed: afterSecurity.today.messages_relayed,
+        responses_410: afterSecurity.today.responses_410
+      },
+      totals: {
+        homepage_views: afterSecurity.totals.homepage_views,
+        rooms_created: afterSecurity.totals.rooms_created,
+        conversations_started: afterSecurity.totals.conversations_started,
+        messages_relayed: afterSecurity.totals.messages_relayed,
+        responses_410: afterSecurity.totals.responses_410
+      }
+    });
+    expect(adminStats.group).toEqual({
+      now: { rooms: 0, people: 0 },
+      today: {
+        group_rooms_created: 0,
+        group_participants_joined: 0,
+        group_messages_relayed: 0,
+        group_responses_410: 0
+      },
+      totals: {
+        group_rooms_created: 0,
+        group_participants_joined: 0,
+        group_messages_relayed: 0,
+        group_responses_410: 0
+      }
+    });
+    const afterAdmin = (await getStats(httpUrl)).stats;
+    expect(afterAdmin.today).toEqual(afterSecurity.today);
+    expect(afterAdmin.totals).toEqual(afterSecurity.totals);
+    expect(afterAdmin.groups).toEqual(afterSecurity.groups);
+    expect(server.manager.stats().activeRooms).toBe(0);
+
     const invalidRoom = await fetch(`${httpUrl}/r/${"A".repeat(43)}`);
     expect(invalidRoom.status).toBe(410);
     expect(invalidRoom.headers.get("content-type")).toBe("text/html; charset=utf-8");
