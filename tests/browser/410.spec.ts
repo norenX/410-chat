@@ -169,6 +169,45 @@ function expectViewportLocked(metrics: Awaited<ReturnType<typeof conversationMet
   expect(metrics.messages.scrollWidth).toBeLessThanOrEqual(metrics.messages.clientWidth + 1);
 }
 
+async function informationPageLayout(page: Page) {
+  return page.evaluate(() => {
+    const rounded = (value: number) => Math.round(value * 1000) / 1000;
+    const pageElement = document.querySelector<HTMLElement>(".security-page")!;
+    const documentElement = document.querySelector<HTMLElement>(".security-document")!;
+    const header = document.querySelector<HTMLElement>(".security-header")!;
+    const brand = document.querySelector<HTMLElement>(".security-brand")!;
+    const source = document.querySelector<HTMLElement>(".security-source")!;
+    const heading = document.querySelector<HTMLElement>(".security-document h1")!;
+    const introduction = document.querySelector<HTMLElement>(".security-introduction")!;
+    const firstSection = document.querySelector<HTMLElement>(".security-document section")!;
+    const firstSectionHeading = firstSection.querySelector<HTMLElement>("h2")!;
+    const pageStyle = getComputedStyle(pageElement);
+    const documentRect = documentElement.getBoundingClientRect();
+    const headerRect = header.getBoundingClientRect();
+    const headingRect = heading.getBoundingClientRect();
+    const introductionRect = introduction.getBoundingClientRect();
+    const firstSectionRect = firstSection.getBoundingClientRect();
+    return {
+      viewportWidth: innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      pagePaddingTop: rounded(Number.parseFloat(pageStyle.paddingTop)),
+      pagePaddingInline: rounded(Number.parseFloat(pageStyle.paddingLeft)),
+      documentLeft: rounded(documentRect.left),
+      documentRight: rounded(documentRect.right),
+      documentWidth: rounded(documentRect.width),
+      headerTop: rounded(headerRect.top),
+      brandLeft: rounded(brand.getBoundingClientRect().left),
+      sourceRight: rounded(source.getBoundingClientRect().right),
+      headerHeadingGap: rounded(headingRect.top - headerRect.bottom),
+      headingSize: rounded(Number.parseFloat(getComputedStyle(heading).fontSize)),
+      introductionGap: rounded(introductionRect.top - headingRect.bottom),
+      introductionSize: rounded(Number.parseFloat(getComputedStyle(introduction).fontSize)),
+      sectionGap: rounded(firstSectionRect.top - introductionRect.bottom),
+      sectionHeadingSize: rounded(Number.parseFloat(getComputedStyle(firstSectionHeading).fontSize))
+    };
+  });
+}
+
 test("admin stats polls aggregate direct and group counters without losing the last snapshot", async ({ page, baseURL }) => {
   const before = await (await page.request.get(`${baseURL}/__stats`)).json() as {
     today: Record<string, number>;
@@ -289,6 +328,7 @@ test("admin stats polls aggregate direct and group counters without losing the l
 });
 
 test("How it works is a direct, concise, mobile-safe product guide with working navigation", async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await navigateDocument(page, baseURL!);
   const howLink = page.getByRole("link", { name: "How it works →", exact: true });
   await expect(howLink).toHaveAttribute("href", "/how-it-works");
@@ -312,23 +352,22 @@ test("How it works is a direct, concise, mobile-safe product guide with working 
   await expect(page.getByText("People can leave and come back while the room still exists.", { exact: true })).toBeVisible();
   await expect(page.getByText("Reloading or rejoining does not bring old messages back.", { exact: true })).toBeVisible();
   await expect(page.getByText("410 Gone", { exact: true })).toBeVisible();
+  await expect(page.locator(".security-page > .security-document > .security-header")).toHaveCount(1);
+  const sourceLink = page.getByRole("link", { name: "Source code → GitHub", exact: true });
+  await expect(sourceLink).toHaveAttribute("href", "https://github.com/norenX/410-chat");
+  await expect(sourceLink).toHaveAttribute("target", "_blank");
+  await expect(sourceLink).toHaveAttribute("rel", "noopener noreferrer");
   await expect(page.getByRole("link", { name: "Security →", exact: true })).toHaveAttribute("href", "/security");
   await expect(page.getByRole("link", { name: "Back →", exact: true })).toHaveAttribute("href", "/");
 
+  const howDesktop = await informationPageLayout(page);
+  expect(howDesktop.scrollWidth).toBeLessThanOrEqual(howDesktop.viewportWidth);
+
   await page.setViewportSize({ width: 390, height: 844 });
-  const mobile = await page.evaluate(() => {
-    const documentElement = document.querySelector<HTMLElement>(".how-document")!;
-    const rect = documentElement.getBoundingClientRect();
-    return {
-      viewportWidth: innerWidth,
-      scrollWidth: document.documentElement.scrollWidth,
-      contentLeft: rect.left,
-      contentRight: rect.right
-    };
-  });
-  expect(mobile.scrollWidth).toBeLessThanOrEqual(mobile.viewportWidth);
-  expect(mobile.contentLeft).toBeGreaterThanOrEqual(20);
-  expect(mobile.contentRight).toBeLessThanOrEqual(mobile.viewportWidth - 20);
+  const howMobile = await informationPageLayout(page);
+  expect(howMobile.scrollWidth).toBeLessThanOrEqual(howMobile.viewportWidth);
+  expect(howMobile.documentLeft).toBeGreaterThanOrEqual(20);
+  expect(howMobile.documentRight).toBeLessThanOrEqual(howMobile.viewportWidth - 20);
 
   await page.getByRole("link", { name: "Back →", exact: true }).click();
   await expect(page).toHaveURL(baseURL!);
@@ -338,6 +377,13 @@ test("How it works is a direct, concise, mobile-safe product guide with working 
   await page.getByRole("link", { name: "Security →", exact: true }).click();
   await expect(page).toHaveURL(`${baseURL}/security`);
   await expect(page.getByRole("heading", { level: 1, name: "Security", exact: true })).toBeVisible();
+  await expect(page.locator(".security-page > .security-document > .security-header")).toHaveCount(1);
+
+  const securityMobile = await informationPageLayout(page);
+  expect(securityMobile).toEqual(howMobile);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const securityDesktop = await informationPageLayout(page);
+  expect(securityDesktop).toEqual(howDesktop);
 
   expect((await page.request.get(`${baseURL}/admin/stats`)).status()).toBe(200);
 });

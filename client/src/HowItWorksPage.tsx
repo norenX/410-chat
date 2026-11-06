@@ -6,14 +6,20 @@ export function HowItWorksPage() {
   }, []);
 
   return (
-    <main className="how-page">
-      <article className="how-document">
-        <header className="how-header">
+    <main className="security-page how-page">
+      <article className="security-document how-document">
+        <header className="security-header">
           <a className="security-brand" href="/" aria-label="410">410</a>
+          <a
+            className="security-source"
+            href="https://github.com/norenX/410-chat"
+            target="_blank"
+            rel="noopener noreferrer"
+          >Source code → GitHub</a>
         </header>
 
         <h1>How it works</h1>
-        <p className="how-introduction">410 is temporary by design.</p>
+        <p className="security-introduction">410 is temporary by design.</p>
 
         <section aria-labelledby="how-one-to-one">
           <h2 id="how-one-to-one">1-TO-1</h2>
