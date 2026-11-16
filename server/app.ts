@@ -5,6 +5,7 @@ import { WebSocketServer } from "ws";
 import type { ViteDevServer } from "vite";
 import { adminStatsSnapshot } from "./admin-stats.js";
 import type { ChatConfig } from "./config.js";
+import { openGeoCountryResolver, type GeoCountryResolver } from "./geoip.js";
 import { MetricsStore, type MetricName } from "./metrics.js";
 import { normalizeTrafficSource, trafficSourceFromPageRequest } from "./attribution.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
@@ -21,6 +22,7 @@ export interface ChatServerOptions {
   hooks?: RoomManagerHooks;
   groupHooks?: GroupRoomManagerHooks;
   metrics?: MetricsStore;
+  geoCountryResolver?: GeoCountryResolver;
 }
 
 export interface ChatServer {
@@ -158,6 +160,8 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
   const { config } = options;
   const metrics = options.metrics ?? new MetricsStore(config.metricsFile);
   await metrics.init();
+  const geoCountryResolver = options.geoCountryResolver ??
+    await openGeoCountryResolver(config.geoIpDatabaseFile);
   const externalHooks = options.hooks;
   const destructionMetric: Partial<Record<DestructionReason, MetricName>> = {
     manual: "destroyed_manual",
@@ -253,8 +257,9 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
 
     if (request.method === "GET" && url.pathname === "/") {
       const source = trafficSourceFromPageRequest(url, request.headers.referer);
+      const country = geoCountryResolver.countryFor(clientIp(request, config.trustProxy));
       response.once("finish", () => {
-        if (response.statusCode === 200) metrics.incrementAttributed("homepage_views", source);
+        if (response.statusCode === 200) metrics.incrementHomepageView(source, country);
       });
     }
 

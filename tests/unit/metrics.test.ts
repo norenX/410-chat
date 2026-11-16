@@ -22,11 +22,11 @@ describe("MetricsStore", () => {
     let now = Date.parse("2026-08-20T23:59:59.900Z");
     const first = new MetricsStore(filePath, { now: () => now, flushDelayMs: 60_000 });
     await first.init();
-    first.increment("homepage_views");
+    first.incrementHomepageView("direct", "GB");
     first.increment("rooms_created");
     first.incrementGroup("group_rooms_created");
     now = Date.parse("2026-08-21T00:00:00.100Z");
-    first.increment("homepage_views");
+    first.incrementHomepageView("direct", "DE");
     first.increment("messages_relayed");
     first.incrementGroup("group_participants_joined");
     await first.close();
@@ -35,12 +35,16 @@ describe("MetricsStore", () => {
       version: number;
       totals: Record<string, number>;
       days: Record<string, Record<string, number>>;
+      geo: { totals: Record<string, number>; days: Record<string, Record<string, number>> };
     };
-    expect(persisted.version).toBe(3);
+    expect(persisted.version).toBe(4);
     expect(Object.keys(persisted.totals)).toEqual([...METRIC_NAMES]);
     expect(Object.keys(persisted.days)).toEqual(["2026-08-20", "2026-08-21"]);
     expect(persisted.days["2026-08-20"].homepage_views).toBe(1);
     expect(persisted.days["2026-08-21"].homepage_views).toBe(1);
+    expect(persisted.geo.totals).toEqual({ GB: 1, DE: 1 });
+    expect(persisted.geo.days["2026-08-20"]).toEqual({ GB: 1 });
+    expect(persisted.geo.days["2026-08-21"]).toEqual({ DE: 1 });
 
     const restarted = new MetricsStore(filePath, { now: () => now });
     await restarted.init();
@@ -59,6 +63,10 @@ describe("MetricsStore", () => {
     expect(snapshot.groups.totals.group_rooms_created).toBe(1);
     expect(snapshot.groups.today.group_participants_joined).toBe(1);
     expect(Object.keys(snapshot.groups.totals)).toEqual([...GROUP_METRIC_NAMES]);
+    expect(snapshot.geo.today).toEqual({ DE: 1 });
+    expect(snapshot.geo.totals).toEqual({ GB: 1, DE: 1 });
+    expect(restarted.snapshot({ waiting: 0, active: 0 }, Date.parse("2026-08-22T00:00:00Z")).geo)
+      .toEqual({ today: {}, totals: { GB: 1, DE: 1 } });
     await restarted.close();
   });
 
@@ -131,7 +139,7 @@ describe("MetricsStore", () => {
       };
     };
 
-    expect(persisted.version).toBe(3);
+    expect(persisted.version).toBe(4);
     expect(persisted.totals).toEqual(totals);
     expect(persisted.sources.totals.unattributed).toEqual({
       homepage_views: 394,
@@ -155,7 +163,7 @@ describe("MetricsStore", () => {
       Object.fromEntries(METRIC_NAMES.map((name) => [name, 0]))
     );
     await store.close();
-    expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(3);
+    expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(4);
   });
 
   it("migrates version 2 metrics and starts isolated group counters at zero", async () => {
@@ -196,7 +204,7 @@ describe("MetricsStore", () => {
       Object.fromEntries(GROUP_METRIC_NAMES.map((name) => [name, 0]))
     );
     await store.close();
-    expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(3);
+    expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(4);
   });
 
   it("loads version 3 direct history when the optional group section is absent", async () => {
@@ -229,6 +237,26 @@ describe("MetricsStore", () => {
       Object.fromEntries(GROUP_METRIC_NAMES.map((name) => [name, 0]))
     );
     expect(snapshot.groups.today).toEqual(snapshot.groups.totals);
+    expect(snapshot.geo).toEqual({ today: {}, totals: {} });
     await store.close();
+  });
+
+  it("persists only normalized aggregate country codes, never raw IP values", async () => {
+    const filePath = await temporaryMetricsFile();
+    const rawIp = "185.12.34.56";
+    const store = new MetricsStore(filePath, {
+      now: () => Date.parse("2026-08-23T12:00:00Z"),
+      flushDelayMs: 60_000
+    });
+    await store.init();
+    store.incrementHomepageView("direct", rawIp);
+    await store.close();
+
+    const persisted = await fs.readFile(filePath, "utf8");
+    expect(persisted).not.toContain(rawIp);
+    expect(JSON.parse(persisted).geo).toEqual({
+      totals: { UNKNOWN: 1 },
+      days: { "2026-08-23": { UNKNOWN: 1 } }
+    });
   });
 });

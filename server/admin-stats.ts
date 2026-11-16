@@ -40,6 +40,10 @@ export function adminStatsSnapshot(snapshot: MetricsSnapshot): AdminStatsSnapsho
         group_messages_relayed: snapshot.groups.totals.group_messages_relayed,
         group_responses_410: snapshot.groups.totals.group_responses_410
       }
+    },
+    geo: {
+      today: { ...snapshot.geo.today },
+      totals: { ...snapshot.geo.totals }
     }
   };
 }

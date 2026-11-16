@@ -11,6 +11,7 @@ import {
 } from "../../client/src/group-crypto-session.js";
 import { createChatServer, type ChatServer } from "../../server/app.js";
 import { configFromEnv } from "../../server/config.js";
+import { UNKNOWN_COUNTRY } from "../../server/geoip.js";
 import { GROUP_METRIC_NAMES, type MetricsSnapshot } from "../../server/metrics.js";
 import type { GroupClientCommand, GroupServerEvent } from "../../shared/group-protocol.js";
 import { waitUntil } from "../helpers.js";
@@ -77,7 +78,8 @@ async function start(overrides: Partial<ReturnType<typeof configFromEnv>> = {}) 
       maxConnectionsPerWindow: 100,
       ...overrides
     },
-    devAssets: false
+    devAssets: false,
+    geoCountryResolver: { countryFor: () => UNKNOWN_COUNTRY }
   });
   running.push(server);
   const address = await server.listen();

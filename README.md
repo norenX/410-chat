@@ -112,6 +112,26 @@ when the Node.js service is reachable exclusively through a reverse proxy you co
 
 Otherwise a direct client could spoof forwarded IP headers and interfere with IP-based rate limiting.
 
+Country statistics use this same trusted-client-IP decision. The IP exists only
+for the duration of the request and is passed to a local GeoLite2 Country MMDB
+lookup. Only the resulting ISO 3166-1 alpha-2 code (or `UNKNOWN`) is added to
+aggregate metrics. Raw IP addresses, IP hashes and visitor identifiers are not
+stored or logged by this feature, and no external GeoIP API is contacted.
+
+The local database path defaults to:
+
+```text
+GEOIP_DB_FILE=/data/GeoLite2-Country.mmdb
+```
+
+If the file is missing, unreadable, or a lookup fails, requests continue
+normally and affected homepage views are counted as `UNKNOWN`. The database is
+not bundled in the image or repository. Install `geoipupdate` on the host,
+configure the `GeoLite2-Country` edition with a MaxMind account/license key,
+then copy the downloaded MMDB into the existing `/data` Docker volume and
+restart only the chat container. Do not put the MaxMind license key in this
+repository or the frontend bundle.
+
 `ALLOWED_ORIGINS` can optionally contain a comma-separated list of exact additional origins. Same-origin requests based on the current `Host` are always accepted.
 
 ## Architecture
@@ -332,6 +352,12 @@ is a minimal projection containing only the DIRECT/GROUP counters displayed by
 `scripts/stats.sh`; it excludes process diagnostics, source attribution and all
 conversation-level data. Loading or polling the admin page does not increment
 `homepage_views` or any conversation counter.
+
+The page also shows a `COUNTRIES` section derived only from homepage page-view
+counters. It displays the ten highest country counts, combines the remainder
+as `OTHER`, and shows `UNKNOWN` separately. These are page views, not unique
+visitors. Persistent metrics use `geo.totals` and UTC-keyed `geo.days`; API
+snapshots expose `geo.today` and `geo.totals`.
 
 The application does not implement admin credentials. In a production setup,
 protect both the page and its JSON endpoint at the reverse proxy with one

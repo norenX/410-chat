@@ -13,6 +13,8 @@ export interface AdminGroupMetricCounts {
   group_responses_410: number;
 }
 
+export type AdminGeoCounts = Record<string, number>;
+
 export interface AdminStatsSnapshot {
   direct: {
     now: {
@@ -29,5 +31,9 @@ export interface AdminStatsSnapshot {
     };
     today: AdminGroupMetricCounts;
     totals: AdminGroupMetricCounts;
+  };
+  geo: {
+    today: AdminGeoCounts;
+    totals: AdminGeoCounts;
   };
 }

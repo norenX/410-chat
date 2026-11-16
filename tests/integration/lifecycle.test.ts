@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createChatServer, type ChatServer } from "../../server/app.js";
 import { configFromEnv } from "../../server/config.js";
+import { UNKNOWN_COUNTRY, type GeoCountryResolver } from "../../server/geoip.js";
 import { GROUP_METRIC_NAMES, METRIC_NAMES, type MetricsSnapshot } from "../../server/metrics.js";
 import { createLinkSecret, sodiumReady } from "../../client/src/crypto-session.js";
 import { WsClient, waitUntil } from "../helpers.js";
@@ -14,7 +15,8 @@ const temporaryDirectories: string[] = [];
 async function start(
   overrides: Partial<ReturnType<typeof configFromEnv>> = {},
   relays?: string[],
-  transitions?: string[]
+  transitions?: string[],
+  geoCountryResolver: GeoCountryResolver = { countryFor: () => UNKNOWN_COUNTRY }
 ) {
   const metricsDirectory = await fs.mkdtemp(join(tmpdir(), "410-metrics-integration-"));
   temporaryDirectories.push(metricsDirectory);
@@ -33,6 +35,7 @@ async function start(
   const server = await createChatServer({
     config,
     devAssets: false,
+    geoCountryResolver,
     hooks: {
       onRelay: (data) => relays?.push(data),
       onTransition: (from, to) => transitions?.push(`${from}->${to}`)
@@ -105,7 +108,7 @@ describe("410 lifecycle", () => {
     expect(adminResponse.headers.get("cache-control")).toBe("no-store");
     expect(adminResponse.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     const adminStats = await adminResponse.json() as Record<string, Record<string, unknown>>;
-    expect(Object.keys(adminStats)).toEqual(["direct", "group"]);
+    expect(Object.keys(adminStats)).toEqual(["direct", "group", "geo"]);
     expect(adminStats.direct).toEqual({
       now: afterSecurity.now,
       today: {
@@ -138,10 +141,12 @@ describe("410 lifecycle", () => {
         group_responses_410: 0
       }
     });
+    expect(adminStats.geo).toEqual(afterSecurity.geo);
     const afterAdmin = (await getStats(httpUrl)).stats;
     expect(afterAdmin.today).toEqual(afterSecurity.today);
     expect(afterAdmin.totals).toEqual(afterSecurity.totals);
     expect(afterAdmin.groups).toEqual(afterSecurity.groups);
+    expect(afterAdmin.geo).toEqual(afterSecurity.geo);
     expect(server.manager.stats().activeRooms).toBe(0);
 
     const invalidRoom = await fetch(`${httpUrl}/r/${"A".repeat(43)}`);
@@ -241,7 +246,7 @@ describe("410 lifecycle", () => {
 
     const { response, stats } = await getStats(httpUrl);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(Object.keys(stats)).toEqual(["startedAt", "uptimeSeconds", "now", "today", "totals", "sources", "groups"]);
+    expect(Object.keys(stats)).toEqual(["startedAt", "uptimeSeconds", "now", "today", "totals", "sources", "groups", "geo"]);
     expect(Object.keys(stats.totals)).toEqual([...METRIC_NAMES]);
     expect(stats.now).toEqual({ waiting: 0, active: 0 });
     expect(stats.totals).toEqual({
@@ -264,6 +269,7 @@ describe("410 lifecycle", () => {
     expect(stats.sources.today.direct).toEqual(
       stats.sources.totals.direct
     );
+    expect(stats.geo).toEqual({ today: { UNKNOWN: 1 }, totals: { UNKNOWN: 1 } });
 
     const serialized = JSON.stringify(stats);
     for (const forbidden of [
@@ -473,6 +479,64 @@ describe("410 lifecycle", () => {
 
     const spoofedSecondIp = await createFromIp("203.0.113.11");
     expect(spoofedSecondIp.status).toBe(429);
+  });
+
+  it("does not use spoofed forwarded IP for homepage country metrics when proxy trust is disabled", async () => {
+    const observed: string[] = [];
+    const spoofedIp = "1.1.1.1";
+    const { httpUrl } = await start(
+      { trustProxy: false },
+      undefined,
+      undefined,
+      {
+        countryFor: (ipAddress) => {
+          observed.push(ipAddress);
+          return ipAddress === spoofedIp ? "AU" : "UNKNOWN";
+        }
+      }
+    );
+
+    const response = await fetch(`${httpUrl}/`, { headers: { "x-forwarded-for": spoofedIp } });
+    expect(response.status).toBe(200);
+    await response.text();
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).not.toBe(spoofedIp);
+    expect((await getStats(httpUrl)).stats.geo).toEqual({
+      today: { UNKNOWN: 1 },
+      totals: { UNKNOWN: 1 }
+    });
+  });
+
+  it("uses the existing trusted proxy IP model for homepage country metrics without persisting IP", async () => {
+    const observed: string[] = [];
+    const forwardedIp = "1.1.1.1";
+    const { server, httpUrl } = await start(
+      { trustProxy: true },
+      undefined,
+      undefined,
+      {
+        countryFor: (ipAddress) => {
+          observed.push(ipAddress);
+          return ipAddress === forwardedIp ? "AU" : "UNKNOWN";
+        }
+      }
+    );
+
+    const response = await fetch(`${httpUrl}/`, {
+      headers: { "x-forwarded-for": `${forwardedIp}, 10.0.0.1` }
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+
+    expect(observed).toEqual([forwardedIp]);
+    const stats = (await getStats(httpUrl)).stats;
+    expect(stats.totals.homepage_views).toBe(1);
+    expect(stats.geo).toEqual({ today: { AU: 1 }, totals: { AU: 1 } });
+    expect(JSON.stringify(stats)).not.toContain(forwardedIp);
+
+    await server.metrics.flush();
+    expect(await fs.readFile(server.metrics.filePath, "utf8")).not.toContain(forwardedIp);
   });
 
   it("treats heartbeat loss as a disconnect and destroys after grace", async () => {

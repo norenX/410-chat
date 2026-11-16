@@ -41,9 +41,10 @@ export type SourceMetricName = typeof SOURCE_METRIC_NAMES[number];
 export type SourceMetricCounts = Record<SourceMetricName, number>;
 export type AttributionSource = TrafficSource | "unattributed";
 export type SourceBuckets = Partial<Record<AttributionSource, SourceMetricCounts>>;
+export type GeoCounts = Record<string, number>;
 
 interface MetricsDocument {
-  version: 3;
+  version: 4;
   totals: MetricCounts;
   days: Record<string, MetricCounts>;
   sources: {
@@ -53,6 +54,10 @@ interface MetricsDocument {
   groups: {
     totals: GroupMetricCounts;
     days: Record<string, GroupMetricCounts>;
+  };
+  geo: {
+    totals: GeoCounts;
+    days: Record<string, GeoCounts>;
   };
 }
 
@@ -76,6 +81,10 @@ export interface MetricsSnapshot {
     };
     today: GroupMetricCounts;
     totals: GroupMetricCounts;
+  };
+  geo: {
+    today: GeoCounts;
+    totals: GeoCounts;
   };
 }
 
@@ -126,6 +135,10 @@ function cloneSourceBuckets(buckets: SourceBuckets): SourceBuckets {
   return result;
 }
 
+function cloneGeoCounts(counts: GeoCounts): GeoCounts {
+  return Object.fromEntries(Object.entries(counts).map(([country, count]) => [country, count]));
+}
+
 function sourceMetricsFromCounts(counts: MetricCounts): SourceMetricCounts {
   return Object.fromEntries(
     SOURCE_METRIC_NAMES.map((name) => [name, counts[name]])
@@ -134,7 +147,7 @@ function sourceMetricsFromCounts(counts: MetricCounts): SourceMetricCounts {
 
 function emptyDocument(): MetricsDocument {
   return {
-    version: 3,
+    version: 4,
     totals: emptyCounts(),
     days: {},
     sources: {
@@ -143,6 +156,10 @@ function emptyDocument(): MetricsDocument {
     },
     groups: {
       totals: emptyGroupCounts(),
+      days: {}
+    },
+    geo: {
+      totals: {},
       days: {}
     }
   };
@@ -231,11 +248,41 @@ function parseSourceDays(value: unknown): Record<string, SourceBuckets> | null {
   return days;
 }
 
+function validCountryCode(value: string): boolean {
+  return value === "UNKNOWN" || /^[A-Z]{2}$/.test(value);
+}
+
+function normalizedCountryCode(value: string): string {
+  const normalized = value.trim().toUpperCase();
+  return validCountryCode(normalized) ? normalized : "UNKNOWN";
+}
+
+function parseGeoCounts(value: unknown): GeoCounts | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const counts: GeoCounts = {};
+  for (const [country, count] of Object.entries(value as Record<string, unknown>)) {
+    if (!validCountryCode(country) || !Number.isSafeInteger(count) || (count as number) < 0) return null;
+    counts[country] = count as number;
+  }
+  return counts;
+}
+
+function parseGeoDays(value: unknown): Record<string, GeoCounts> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const days: Record<string, GeoCounts> = {};
+  for (const [day, rawCounts] of Object.entries(value as Record<string, unknown>)) {
+    const counts = parseGeoCounts(rawCounts);
+    if (!isUtcDay(day) || !counts) return null;
+    days[day] = counts;
+  }
+  return days;
+}
+
 function parseDocument(value: unknown): MetricsDocument | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
 
-  if (record.version !== 1 && record.version !== 2 && record.version !== 3) return null;
+  if (record.version !== 1 && record.version !== 2 && record.version !== 3 && record.version !== 4) return null;
 
   const totals = parseCounts(record.totals);
   if (!totals || !record.days || typeof record.days !== "object" || Array.isArray(record.days)) return null;
@@ -258,7 +305,7 @@ function parseDocument(value: unknown): MetricsDocument | null {
     }
 
     return {
-      version: 3,
+      version: 4,
       totals,
       days,
       sources: {
@@ -269,6 +316,10 @@ function parseDocument(value: unknown): MetricsDocument | null {
       },
       groups: {
         totals: emptyGroupCounts(),
+        days: {}
+      },
+      geo: {
+        totals: {},
         days: {}
       }
     };
@@ -285,7 +336,7 @@ function parseDocument(value: unknown): MetricsDocument | null {
   let groupTotals = emptyGroupCounts();
   const groupDays: Record<string, GroupMetricCounts> = {};
 
-  if (record.version === 3 && record.groups !== undefined) {
+  if ((record.version === 3 || record.version === 4) && record.groups !== undefined) {
     if (!record.groups || typeof record.groups !== "object" || Array.isArray(record.groups)) return null;
     const groupRecord = record.groups as Record<string, unknown>;
     if (groupRecord.totals !== undefined) {
@@ -303,8 +354,21 @@ function parseDocument(value: unknown): MetricsDocument | null {
     }
   }
 
+  let geoTotals: GeoCounts = {};
+  let geoDays: Record<string, GeoCounts> = {};
+
+  if (record.version === 4 && record.geo !== undefined) {
+    if (!record.geo || typeof record.geo !== "object" || Array.isArray(record.geo)) return null;
+    const geoRecord = record.geo as Record<string, unknown>;
+    const parsedTotals = parseGeoCounts(geoRecord.totals);
+    const parsedDays = parseGeoDays(geoRecord.days);
+    if (!parsedTotals || !parsedDays) return null;
+    geoTotals = parsedTotals;
+    geoDays = parsedDays;
+  }
+
   return {
-    version: 3,
+    version: 4,
     totals,
     days,
     sources: {
@@ -314,6 +378,10 @@ function parseDocument(value: unknown): MetricsDocument | null {
     groups: {
       totals: groupTotals,
       days: groupDays
+    },
+    geo: {
+      totals: geoTotals,
+      days: geoDays
     }
   };
 }
@@ -354,7 +422,10 @@ export class MetricsStore {
         decoded &&
         typeof decoded === "object" &&
         !Array.isArray(decoded) &&
-        (decoded as Record<string, unknown>).version !== 3
+        (
+          (decoded as Record<string, unknown>).version !== 4 ||
+          (decoded as Record<string, unknown>).geo === undefined
+        )
       ) {
         this.dirty = true;
         await this.flush();
@@ -384,38 +455,28 @@ export class MetricsStore {
     timestamp = this.now()
   ): void {
     const day = utcDay(timestamp);
-    const daily = this.data.days[day] ?? (this.data.days[day] = emptyCounts());
+    this.incrementAttributedValue(name, source, day);
+    this.dirty = true;
+    this.scheduleFlush();
+  }
 
-    const totalSource =
-      this.data.sources.totals[source] ??
-      (this.data.sources.totals[source] = emptySourceMetricCounts());
+  incrementHomepageView(
+    source: TrafficSource,
+    country: string,
+    timestamp = this.now()
+  ): void {
+    const day = utcDay(timestamp);
+    this.incrementAttributedValue("homepage_views", source, day);
 
-    const dailySources =
-      this.data.sources.days[day] ??
-      (this.data.sources.days[day] = {});
-
-    const dailySource =
-      dailySources[source] ??
-      (dailySources[source] = emptySourceMetricCounts());
-
-    this.data.totals[name] = Math.min(
+    const countryCode = normalizedCountryCode(country);
+    const dailyGeo = this.data.geo.days[day] ?? (this.data.geo.days[day] = {});
+    this.data.geo.totals[countryCode] = Math.min(
       Number.MAX_SAFE_INTEGER,
-      this.data.totals[name] + 1
+      (this.data.geo.totals[countryCode] ?? 0) + 1
     );
-
-    daily[name] = Math.min(
+    dailyGeo[countryCode] = Math.min(
       Number.MAX_SAFE_INTEGER,
-      daily[name] + 1
-    );
-
-    totalSource[name] = Math.min(
-      Number.MAX_SAFE_INTEGER,
-      totalSource[name] + 1
-    );
-
-    dailySource[name] = Math.min(
-      Number.MAX_SAFE_INTEGER,
-      dailySource[name] + 1
+      (dailyGeo[countryCode] ?? 0) + 1
     );
 
     this.dirty = true;
@@ -457,6 +518,10 @@ export class MetricsStore {
         },
         today: cloneGroupCounts(this.data.groups.days[utcDay(timestamp)] ?? emptyGroupCounts()),
         totals: cloneGroupCounts(this.data.groups.totals)
+      },
+      geo: {
+        today: cloneGeoCounts(this.data.geo.days[utcDay(timestamp)] ?? {}),
+        totals: cloneGeoCounts(this.data.geo.totals)
       }
     };
   }
@@ -496,6 +561,25 @@ export class MetricsStore {
     if (this.closing || this.flushTimer || this.flushPromise) return;
     this.flushTimer = setTimeout(() => void this.flush(), this.flushDelayMs);
     this.flushTimer.unref();
+  }
+
+  private incrementAttributedValue(
+    name: SourceMetricName,
+    source: TrafficSource,
+    day: string
+  ): void {
+    const daily = this.data.days[day] ?? (this.data.days[day] = emptyCounts());
+    const totalSource = this.data.sources.totals[source] ??
+      (this.data.sources.totals[source] = emptySourceMetricCounts());
+    const dailySources = this.data.sources.days[day] ??
+      (this.data.sources.days[day] = {});
+    const dailySource = dailySources[source] ??
+      (dailySources[source] = emptySourceMetricCounts());
+
+    this.data.totals[name] = Math.min(Number.MAX_SAFE_INTEGER, this.data.totals[name] + 1);
+    daily[name] = Math.min(Number.MAX_SAFE_INTEGER, daily[name] + 1);
+    totalSource[name] = Math.min(Number.MAX_SAFE_INTEGER, totalSource[name] + 1);
+    dailySource[name] = Math.min(Number.MAX_SAFE_INTEGER, dailySource[name] + 1);
   }
 
   private async writeAtomically(serialized: string): Promise<void> {

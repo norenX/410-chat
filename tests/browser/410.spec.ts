@@ -213,6 +213,7 @@ test("admin stats polls aggregate direct and group counters without losing the l
     today: Record<string, number>;
     totals: Record<string, number>;
     groups: { today: Record<string, number>; totals: Record<string, number> };
+    geo: { today: Record<string, number>; totals: Record<string, number> };
   };
   let requestCount = 0;
   let failRequests = false;
@@ -248,6 +249,16 @@ test("admin stats polls aggregate direct and group counters without losing the l
         group_messages_relayed: 44,
         group_responses_410: 11
       }
+    },
+    geo: {
+      today: {
+        RU: 42, DE: 11, IN: 10, NL: 7, US: 5, FR: 4, GB: 3,
+        CA: 2, AU: 1, BR: 1, JP: 1, ZA: 1, UNKNOWN: 2
+      },
+      totals: {
+        RU: 183, DE: 41, NL: 26, US: 19, FR: 17, GB: 16, CA: 15,
+        AU: 14, BR: 13, JP: 12, MX: 11, UNKNOWN: 7
+      }
     }
   };
 
@@ -264,8 +275,10 @@ test("admin stats polls aggregate direct and group counters without losing the l
   await expect(page.getByRole("heading", { level: 1, name: "410.chat stats" })).toBeVisible();
   const direct = page.getByRole("region", { name: "DIRECT" });
   const group = page.getByRole("region", { name: "GROUP" });
+  const countries = page.getByRole("region", { name: "COUNTRIES" });
   await expect(direct).toBeVisible();
   await expect(group).toBeVisible();
+  await expect(countries).toBeVisible();
   await expect(page.getByRole("status")).toContainText("LIVE");
   await expect(page.getByText(/Updated \d{2}:\d{2}:\d{2}/)).toBeVisible();
   await expect(direct.locator(".admin-stats-period").nth(0).locator("dd")).toHaveText(["2", "1"]);
@@ -274,6 +287,19 @@ test("admin stats polls aggregate direct and group counters without losing the l
   await expect(group.locator(".admin-stats-period").nth(0).locator("dd")).toHaveText(["1", "4"]);
   await expect(group.locator(".admin-stats-period").nth(1).locator("dd")).toHaveText(["2", "6", "8", "3"]);
   await expect(group.locator(".admin-stats-period").nth(2).locator("dd")).toHaveText(["9", "22", "44", "11"]);
+  await expect(countries.getByText("Counts are page views, not unique visitors.", { exact: true })).toBeVisible();
+  await expect(countries.locator(".admin-stats-period").nth(0).locator("dt")).toHaveText([
+    "RU", "DE", "IN", "NL", "US", "FR", "GB", "CA", "AU", "BR", "OTHER", "UNKNOWN"
+  ]);
+  await expect(countries.locator(".admin-stats-period").nth(0).locator("dd")).toHaveText([
+    "42", "11", "10", "7", "5", "4", "3", "2", "1", "1", "2", "2"
+  ]);
+  await expect(countries.locator(".admin-stats-period").nth(1).locator("dt")).toHaveText([
+    "RU", "DE", "NL", "US", "FR", "GB", "CA", "AU", "BR", "JP", "OTHER", "UNKNOWN"
+  ]);
+  await expect(countries.locator(".admin-stats-period").nth(1).locator("dd")).toHaveText([
+    "183", "41", "26", "19", "17", "16", "15", "14", "13", "12", "11", "7"
+  ]);
 
   payload = {
     ...payload,
@@ -313,10 +339,12 @@ test("admin stats polls aggregate direct and group counters without losing the l
     viewportWidth: innerWidth,
     scrollWidth: document.documentElement.scrollWidth,
     periodColumns: getComputedStyle(document.querySelector<HTMLElement>(".admin-stats-periods")!).gridTemplateColumns,
+    countryColumns: getComputedStyle(document.querySelector<HTMLElement>(".admin-country-periods")!).gridTemplateColumns,
     contentLeft: document.querySelector<HTMLElement>(".admin-stats-shell")!.getBoundingClientRect().left
   }));
   expect(mobile.scrollWidth).toBeLessThanOrEqual(mobile.viewportWidth);
   expect(mobile.periodColumns.split(" ")).toHaveLength(1);
+  expect(mobile.countryColumns.split(" ")).toHaveLength(2);
   expect(mobile.contentLeft).toBeGreaterThanOrEqual(20);
   await expect(page.locator("a, button")).toHaveCount(0);
 
@@ -325,6 +353,7 @@ test("admin stats polls aggregate direct and group counters without losing the l
   expect(after.totals).toEqual(before.totals);
   expect(after.groups.today).toEqual(before.groups.today);
   expect(after.groups.totals).toEqual(before.groups.totals);
+  expect(after.geo).toEqual(before.geo);
 });
 
 test("How it works is a direct, concise, mobile-safe product guide with working navigation", async ({ page, baseURL }) => {

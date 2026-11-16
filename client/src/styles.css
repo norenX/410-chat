@@ -319,6 +319,24 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   gap: 34px;
 }
 
+.admin-country-periods {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 34px;
+}
+
+.admin-countries-section > p {
+  margin: -8px 0 20px;
+  color: var(--quiet);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.admin-country-values dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  letter-spacing: .04em;
+}
+
 .admin-stats-period {
   padding-top: 14px;
   border-top: 1px solid var(--line);
@@ -904,6 +922,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .admin-stats-page { padding: 36px 22px 52px; }
   .admin-stats-header { padding-bottom: 22px; }
   .admin-stats-periods { grid-template-columns: 1fr; gap: 26px; }
+  .admin-country-periods { gap: 20px; }
   .admin-stats-section { margin-top: 40px; }
   .admin-stats-updated { margin-top: 44px; }
   .logo { margin-bottom: 46px; }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type {
   AdminDirectMetricCounts,
+  AdminGeoCounts,
   AdminGroupMetricCounts,
   AdminStatsSnapshot
 } from "../../shared/admin-stats.js";
@@ -34,12 +35,20 @@ function validCounts<T extends string>(value: unknown, fields: readonly T[]): va
   return fields.every((field) => validCount(record[field]));
 }
 
+function validGeoCounts(value: unknown): value is AdminGeoCounts {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.entries(value as Record<string, unknown>).every(([country, count]) =>
+    (country === "UNKNOWN" || /^[A-Z]{2}$/.test(country)) && validCount(count)
+  );
+}
+
 function parseStats(value: unknown): AdminStatsSnapshot | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const root = value as Record<string, unknown>;
   const direct = root.direct as Record<string, unknown> | undefined;
   const group = root.group as Record<string, unknown> | undefined;
-  if (!direct || !group) return null;
+  const geo = root.geo as Record<string, unknown> | undefined;
+  if (!direct || !group || !geo) return null;
 
   const directNow = direct.now as Record<string, unknown> | undefined;
   const groupNow = group.now as Record<string, unknown> | undefined;
@@ -52,10 +61,27 @@ function parseStats(value: unknown): AdminStatsSnapshot | null {
   const groupKeys = GROUP_FIELDS.map(([, key]) => key);
   if (
     !validCounts(direct.today, directKeys) || !validCounts(direct.totals, directKeys) ||
-    !validCounts(group.today, groupKeys) || !validCounts(group.totals, groupKeys)
+    !validCounts(group.today, groupKeys) || !validCounts(group.totals, groupKeys) ||
+    !validGeoCounts(geo.today) || !validGeoCounts(geo.totals)
   ) return null;
 
   return value as AdminStatsSnapshot;
+}
+
+interface CountryRow {
+  country: string;
+  count: number;
+}
+
+function countryRows(counts: AdminGeoCounts): CountryRow[] {
+  const countries = Object.entries(counts)
+    .filter(([country]) => country !== "UNKNOWN")
+    .sort(([countryA, countA], [countryB, countB]) => countB - countA || countryA.localeCompare(countryB));
+  const visible = countries.slice(0, 10).map(([country, count]) => ({ country, count }));
+  const other = countries.slice(10).reduce((sum, [, count]) => sum + count, 0);
+  if (other > 0) visible.push({ country: "OTHER", count: other });
+  visible.push({ country: "UNKNOWN", count: counts.UNKNOWN ?? 0 });
+  return visible;
 }
 
 function updateTime(date: Date): string {
@@ -130,6 +156,38 @@ function GroupSection({ stats }: { stats: AdminStatsSnapshot["group"] }) {
   );
 }
 
+function CountryRows({ values }: { values: AdminGeoCounts }) {
+  return (
+    <dl className="admin-stats-values admin-country-values">
+      {countryRows(values).map(({ country, count }) => (
+        <div key={country}>
+          <dt>{country}</dt>
+          <dd>{count.toLocaleString()}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function CountriesSection({ stats }: { stats: AdminStatsSnapshot["geo"] }) {
+  return (
+    <section className="admin-stats-section admin-countries-section" aria-labelledby="country-stats-title">
+      <h2 id="country-stats-title">COUNTRIES</h2>
+      <p>Counts are page views, not unique visitors.</p>
+      <div className="admin-country-periods">
+        <div className="admin-stats-period">
+          <h3>TODAY</h3>
+          <CountryRows values={stats.today} />
+        </div>
+        <div className="admin-stats-period">
+          <h3>TOTAL</h3>
+          <CountryRows values={stats.totals} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function AdminStatsPage() {
   const [stats, setStats] = useState<AdminStatsSnapshot | null>(null);
   const [state, setState] = useState<UpdateState>("loading");
@@ -188,6 +246,7 @@ export function AdminStatsPage() {
           <>
             <DirectSection stats={stats.direct} />
             <GroupSection stats={stats.group} />
+            <CountriesSection stats={stats.geo} />
           </>
         ) : (
           <p className="admin-stats-empty">{state === "failed" ? "Stats unavailable." : "Loading stats…"}</p>

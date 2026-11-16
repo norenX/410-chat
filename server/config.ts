@@ -2,6 +2,7 @@ export interface ChatConfig {
   host: string;
   port: number;
   metricsFile: string;
+  geoIpDatabaseFile: string;
   trustProxy: boolean;
   hardTtlMs: number;
   disconnectGraceMs: number;
@@ -48,6 +49,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): ChatConfig 
     host: env.HOST || "0.0.0.0",
     port: positiveInteger(env.PORT, 8080),
     metricsFile: env.METRICS_FILE || "/data/metrics.json",
+    geoIpDatabaseFile: env.GEOIP_DB_FILE || "/data/GeoLite2-Country.mmdb",
     trustProxy: boolean(env.TRUST_PROXY),
     hardTtlMs: positiveInteger(env.HARD_TTL_MS, 30 * 60 * 1000),
     disconnectGraceMs: positiveInteger(env.DISCONNECT_GRACE_MS, 15 * 1000),
