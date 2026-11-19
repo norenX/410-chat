@@ -1,5 +1,5 @@
 import { BlockList, isIP } from "node:net";
-import { Reader } from "@maxmind/geoip2-node";
+import { open } from "maxmind";
 
 export const UNKNOWN_COUNTRY = "UNKNOWN";
 
@@ -8,7 +8,7 @@ export interface GeoCountryResolver {
 }
 
 interface GeoIpReader {
-  country(ipAddress: string): { country?: { isoCode: string } };
+  get(ipAddress: string): unknown;
 }
 
 export interface GeoCountryResolverOptions {
@@ -63,7 +63,16 @@ function normalizedPublicIp(value: string): string | null {
 }
 
 function validCountryCode(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Z]{2}$/.test(value);
+  return typeof value === "string" && value !== "ZZ" && /^[A-Z]{2}$/.test(value);
+}
+
+function countryCodeFromRecord(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return UNKNOWN_COUNTRY;
+  const country = (value as Record<string, unknown>).country;
+  if (!country || typeof country !== "object" || Array.isArray(country)) return UNKNOWN_COUNTRY;
+  const isoCode = (country as Record<string, unknown>).iso_code;
+  const normalized = typeof isoCode === "string" ? isoCode.toUpperCase() : undefined;
+  return validCountryCode(normalized) ? normalized : UNKNOWN_COUNTRY;
 }
 
 class MmdbCountryResolver implements GeoCountryResolver {
@@ -79,8 +88,7 @@ class MmdbCountryResolver implements GeoCountryResolver {
     if (!publicIp) return UNKNOWN_COUNTRY;
 
     try {
-      const countryCode = this.reader.country(publicIp).country?.isoCode?.toUpperCase();
-      return validCountryCode(countryCode) ? countryCode : UNKNOWN_COUNTRY;
+      return countryCodeFromRecord(this.reader.get(publicIp));
     } catch {
       if (!this.warnedLookupFailure) {
         this.warnedLookupFailure = true;
@@ -100,7 +108,10 @@ export async function openGeoCountryResolver(
   options: GeoCountryResolverOptions = {}
 ): Promise<GeoCountryResolver> {
   const logger = options.logger ?? console;
-  const openReader = options.openReader ?? ((path: string) => Reader.open(path));
+  const openReader = options.openReader ?? (async (path: string) => {
+    const reader = await open(path);
+    return { get: (address: string) => reader.get(address) };
+  });
 
   try {
     return new MmdbCountryResolver(await openReader(filePath), logger);

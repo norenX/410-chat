@@ -113,24 +113,34 @@ when the Node.js service is reachable exclusively through a reverse proxy you co
 Otherwise a direct client could spoof forwarded IP headers and interfere with IP-based rate limiting.
 
 Country statistics use this same trusted-client-IP decision. The IP exists only
-for the duration of the request and is passed to a local GeoLite2 Country MMDB
-lookup. Only the resulting ISO 3166-1 alpha-2 code (or `UNKNOWN`) is added to
-aggregate metrics. Raw IP addresses, IP hashes and visitor identifiers are not
-stored or logged by this feature, and no external GeoIP API is contacted.
+for the duration of the request and is passed to a local DB-IP Lite Country
+MMDB lookup. Only the resulting ISO 3166-1 alpha-2 code (or `UNKNOWN`) is added
+to aggregate metrics. Raw IP addresses, IP hashes and visitor identifiers are
+not stored or logged by this feature, and no external GeoIP API is contacted.
 
 The local database path defaults to:
 
 ```text
-GEOIP_DB_FILE=/data/GeoLite2-Country.mmdb
+GEOIP_DB_FILE=/data/dbip-country-lite.mmdb
 ```
 
 If the file is missing, unreadable, or a lookup fails, requests continue
 normally and affected homepage views are counted as `UNKNOWN`. The database is
-not bundled in the image or repository. Install `geoipupdate` on the host,
-configure the `GeoLite2-Country` edition with a MaxMind account/license key,
-then copy the downloaded MMDB into the existing `/data` Docker volume and
-restart only the chat container. Do not put the MaxMind license key in this
-repository or the frontend bundle.
+not bundled in the image or repository. DB-IP publishes the Lite Country MMDB
+monthly. After building the current image, run `scripts/update-dbip-country.sh`
+from the repository root. It downloads the current UTC month's official file,
+validates it with the application's MMDB reader, stages it in the existing
+`/data` volume, atomically replaces the active database, and restarts only the
+chat container. A failed download or validation leaves the active database and
+container untouched. No account or license key is required.
+
+For an initial code deployment, run the updater with `DBIP_RESTART=false` and
+then recreate `chat` from the newly built image. Subsequent monthly updates can
+run the script without overrides; it restarts `chat` after a successful swap.
+
+DB-IP Lite Country is distributed under CC BY 4.0. The required `IP
+Geolocation by DB-IP` link is displayed directly in the `COUNTRIES` section of
+the stats page.
 
 `ALLOWED_ORIGINS` can optionally contain a comma-separated list of exact additional origins. Same-origin requests based on the current `Host` are always accepted.
 
@@ -358,6 +368,8 @@ counters. It displays the ten highest country counts, combines the remainder
 as `OTHER`, and shows `UNKNOWN` separately. These are page views, not unique
 visitors. Persistent metrics use `geo.totals` and UTC-keyed `geo.days`; API
 snapshots expose `geo.today` and `geo.totals`.
+The local database is DB-IP Lite Country, updated monthly. The stats page shows
+the required DB-IP attribution beside these aggregate country results.
 
 The application does not implement admin credentials. In a production setup,
 protect both the page and its JSON endpoint at the reverse proxy with one

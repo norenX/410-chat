@@ -17,8 +17,8 @@
     "lint": "eslint client server tests --max-warnings=0"
   },
   "dependencies": {
-    "@maxmind/geoip2-node": "^7.1.0",
     "libsodium-wrappers": "^0.7.15",
+    "maxmind": "^5.1.0",
     "qr": "0.6.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",

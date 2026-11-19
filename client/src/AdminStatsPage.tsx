@@ -184,6 +184,14 @@ function CountriesSection({ stats }: { stats: AdminStatsSnapshot["geo"] }) {
           <CountryRows values={stats.totals} />
         </div>
       </div>
+      <a
+        className="admin-geo-attribution"
+        href="https://db-ip.com"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        IP Geolocation by DB-IP
+      </a>
     </section>
   );
 }

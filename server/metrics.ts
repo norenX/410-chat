@@ -254,7 +254,7 @@ function validCountryCode(value: string): boolean {
 
 function normalizedCountryCode(value: string): string {
   const normalized = value.trim().toUpperCase();
-  return validCountryCode(normalized) ? normalized : "UNKNOWN";
+  return validCountryCode(normalized) && normalized !== "ZZ" ? normalized : "UNKNOWN";
 }
 
 function parseGeoCounts(value: unknown): GeoCounts | null {
@@ -262,7 +262,11 @@ function parseGeoCounts(value: unknown): GeoCounts | null {
   const counts: GeoCounts = {};
   for (const [country, count] of Object.entries(value as Record<string, unknown>)) {
     if (!validCountryCode(country) || !Number.isSafeInteger(count) || (count as number) < 0) return null;
-    counts[country] = count as number;
+    const normalized = normalizedCountryCode(country);
+    counts[normalized] = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      (counts[normalized] ?? 0) + (count as number)
+    );
   }
   return counts;
 }

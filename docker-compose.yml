@@ -16,7 +16,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       METRICS_FILE: ${METRICS_FILE:-/data/metrics.json}
-      GEOIP_DB_FILE: ${GEOIP_DB_FILE:-/data/GeoLite2-Country.mmdb}
+      GEOIP_DB_FILE: ${GEOIP_DB_FILE:-/data/dbip-country-lite.mmdb}
       TRUST_PROXY: ${TRUST_PROXY:-false}
       HARD_TTL_MS: ${HARD_TTL_MS:-1800000}
       DISCONNECT_GRACE_MS: ${DISCONNECT_GRACE_MS:-15000}

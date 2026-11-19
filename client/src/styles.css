@@ -337,6 +337,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   letter-spacing: .04em;
 }
 
+.admin-geo-attribution {
+  display: inline-block;
+  margin-top: 20px;
+  color: var(--quiet);
+  font-size: 11px;
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.admin-geo-attribution:hover {
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .admin-stats-period {
   padding-top: 14px;
   border-top: 1px solid var(--line);

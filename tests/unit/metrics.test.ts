@@ -250,13 +250,14 @@ describe("MetricsStore", () => {
     });
     await store.init();
     store.incrementHomepageView("direct", rawIp);
+    store.incrementHomepageView("direct", "ZZ");
     await store.close();
 
     const persisted = await fs.readFile(filePath, "utf8");
     expect(persisted).not.toContain(rawIp);
     expect(JSON.parse(persisted).geo).toEqual({
-      totals: { UNKNOWN: 1 },
-      days: { "2026-08-23": { UNKNOWN: 1 } }
+      totals: { UNKNOWN: 2 },
+      days: { "2026-08-23": { UNKNOWN: 2 } }
     });
   });
 });

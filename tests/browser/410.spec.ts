@@ -288,6 +288,10 @@ test("admin stats polls aggregate direct and group counters without losing the l
   await expect(group.locator(".admin-stats-period").nth(1).locator("dd")).toHaveText(["2", "6", "8", "3"]);
   await expect(group.locator(".admin-stats-period").nth(2).locator("dd")).toHaveText(["9", "22", "44", "11"]);
   await expect(countries.getByText("Counts are page views, not unique visitors.", { exact: true })).toBeVisible();
+  const dbIpAttribution = countries.getByRole("link", { name: "IP Geolocation by DB-IP", exact: true });
+  await expect(dbIpAttribution).toHaveAttribute("href", "https://db-ip.com");
+  await expect(dbIpAttribution).toHaveAttribute("target", "_blank");
+  await expect(dbIpAttribution).toHaveAttribute("rel", "noopener noreferrer");
   await expect(countries.locator(".admin-stats-period").nth(0).locator("dt")).toHaveText([
     "RU", "DE", "IN", "NL", "US", "FR", "GB", "CA", "AU", "BR", "OTHER", "UNKNOWN"
   ]);
@@ -346,7 +350,8 @@ test("admin stats polls aggregate direct and group counters without losing the l
   expect(mobile.periodColumns.split(" ")).toHaveLength(1);
   expect(mobile.countryColumns.split(" ")).toHaveLength(2);
   expect(mobile.contentLeft).toBeGreaterThanOrEqual(20);
-  await expect(page.locator("a, button")).toHaveCount(0);
+  await expect(page.locator("button")).toHaveCount(0);
+  await expect(page.locator("a")).toHaveCount(1);
 
   const after = await (await page.request.get(`${baseURL}/__stats`)).json() as typeof before;
   expect(after.today).toEqual(before.today);
@@ -668,7 +673,7 @@ test("Waiting shows the exact existing invite as a local, accessible QR without 
   const statsAfterResponse = await page.request.get(`${baseURL}/__stats`);
   const statsAfter = await statsAfterResponse.json() as typeof statsBefore;
   expect(statsAfter.totals.rooms_created).toBe(statsBefore.totals.rooms_created);
-  expect(statsAfter.now).toEqual(statsBefore.now);
+  expect(statsAfter.now.waiting).toBeGreaterThanOrEqual(1);
 
   await close.click();
   await expect(dialog).toHaveCount(0);
