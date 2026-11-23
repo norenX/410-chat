@@ -1,6 +1,9 @@
 export type GroupRoomState = "OPEN" | "SEALED" | "DESTROYED";
 export type GroupRoomPhase = "REKEYING" | "ACTIVE";
 
+export const GROUP_PARTICIPANT_LIMITS = [3, 4, 5, 6, 7, 8, 9, 10] as const;
+export type GroupParticipantLimit = typeof GROUP_PARTICIPANT_LIMITS[number];
+
 export interface GroupEpochDescriptor {
   epoch: number;
   epochNonce: string;
@@ -78,6 +81,7 @@ export type GroupServerEvent =
       heartbeatEveryMs: number;
       disconnectGraceMs: number;
       maxParticipants: number;
+      participantLimit: GroupParticipantLimit;
       presenceCount: number;
       persona: GroupPersona;
       personaKind: "primary" | "ephemeral";

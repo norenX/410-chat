@@ -10,6 +10,29 @@ export interface GroupPresenceChange {
   persona: GroupPersona;
 }
 
+export interface GroupSystemNotice {
+  kind: "presence";
+  id: string;
+  text: string;
+}
+
+export const ROOM_SEALED_NOTICE: GroupSystemNotice = {
+  kind: "presence",
+  id: "system:room-sealed",
+  text: "Room sealed. No one else can join."
+};
+
+export function appendRoomSealedNotice<T extends { id: string }>(
+  items: T[],
+  maximumItems: number
+): Array<T | GroupSystemNotice> {
+  if (items.some((item) => item.id === ROOM_SEALED_NOTICE.id)) return items;
+  const retained = items.length < maximumItems
+    ? items
+    : maximumItems > 1 ? items.slice(-(maximumItems - 1)) : [];
+  return [...retained, { ...ROOM_SEALED_NOTICE }];
+}
+
 function personaKey(persona: GroupPersona): string {
   return `${persona.nickname}\u0000${persona.color}`;
 }

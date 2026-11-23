@@ -11,7 +11,9 @@ import { normalizeTrafficSource, trafficSourceFromPageRequest } from "./attribut
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import { RoomManager, type DestructionReason, type RoomManagerHooks } from "./room-manager.js";
 import {
+  GROUP_DEFAULT_PARTICIPANT_LIMIT,
   GroupRoomManager,
+  isGroupParticipantLimit,
   type GroupDestructionReason,
   type GroupRoomManagerHooks
 } from "./group-room-manager.js";
@@ -329,13 +331,27 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
       }
       const ownerVerifier = parsed.value?.ownerVerifier;
       const ownerRecoveryVerifier = parsed.value?.ownerRecoveryVerifier;
+      const requestedParticipantLimit = parsed.value?.participantLimit;
       if (typeof ownerVerifier !== "string" || typeof ownerRecoveryVerifier !== "string") {
+        json(response, 400, { error: "invalid_request" });
+        return;
+      }
+      const participantLimit = requestedParticipantLimit === undefined
+        ? GROUP_DEFAULT_PARTICIPANT_LIMIT
+        : requestedParticipantLimit;
+      if (!isGroupParticipantLimit(participantLimit)) {
         json(response, 400, { error: "invalid_request" });
         return;
       }
       try {
         const source = normalizeTrafficSource(request.headers["x-410-source"]);
-        const created = groupManager.createRoom(ownerVerifier, ownerRecoveryVerifier, Date.now(), source);
+        const created = groupManager.createRoom(
+          ownerVerifier,
+          ownerRecoveryVerifier,
+          Date.now(),
+          source,
+          participantLimit
+        );
         if (!created) {
           json(response, 503, { error: "capacity_reached" });
           return;

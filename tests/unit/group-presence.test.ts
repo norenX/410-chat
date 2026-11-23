@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { GroupPersona } from "../../shared/group-protocol.js";
 import {
+  appendRoomSealedNotice,
   createActivePersonaRoster,
-  diffActivePersonaRosters
+  diffActivePersonaRosters,
+  ROOM_SEALED_NOTICE
 } from "../../client/src/group-presence.js";
 
 const IVORY_HERON = { nickname: "Ivory Heron", color: "#2f6f5e" } satisfies GroupPersona;
@@ -15,6 +17,16 @@ function roster(selfMemberId: string, entries: Array<[string, GroupPersona]>) {
 }
 
 describe("local group presence events", () => {
+  it("adds the room-sealed system notice once and keeps the stream bounded", () => {
+    const initial = [
+      { kind: "presence" as const, id: "one", text: "Jade Dove joined" },
+      { kind: "presence" as const, id: "two", text: "Amber Fox joined" }
+    ];
+    const sealed = appendRoomSealedNotice(initial, 2);
+    expect(sealed).toEqual([initial[1], ROOM_SEALED_NOTICE]);
+    expect(appendRoomSealedNotice(sealed, 2)).toBe(sealed);
+  });
+
   it("uses the first active roster only as a baseline", () => {
     expect(diffActivePersonaRosters(undefined, roster("a", [["a", IVORY_HERON]]))).toEqual([]);
   });

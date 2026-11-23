@@ -41,7 +41,9 @@ The current group-room limits are:
 
 - reusable invite while the room is open; the creator may irreversibly Seal
   the room to stop all new joins while admitted participants continue;
-- up to 10 simultaneous participants;
+- an immutable creator-selected limit from 3 through 10 participants, counting
+  the creator; admitting the final allowed participant automatically uses the
+  same irreversible Seal transition;
 - 15-second disconnect grace;
 - rekey on join, final leave, and reconnect;
 - absolute 24-hour TTL from creation;
@@ -496,7 +498,7 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 The primary product remains:
 
 ```text
-one link → two people → conversation → gone
+one link → one room → conversation → gone
 ```
 
 The optional group-room experiment follows the same ephemeral/no-history

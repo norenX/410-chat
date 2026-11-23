@@ -13,7 +13,11 @@ import { createChatServer, type ChatServer } from "../../server/app.js";
 import { configFromEnv } from "../../server/config.js";
 import { UNKNOWN_COUNTRY } from "../../server/geoip.js";
 import { GROUP_METRIC_NAMES, type MetricsSnapshot } from "../../server/metrics.js";
-import type { GroupClientCommand, GroupServerEvent } from "../../shared/group-protocol.js";
+import type {
+  GroupClientCommand,
+  GroupParticipantLimit,
+  GroupServerEvent
+} from "../../shared/group-protocol.js";
 import { waitUntil } from "../helpers.js";
 
 const running: ChatServer[] = [];
@@ -90,14 +94,28 @@ async function start(overrides: Partial<ReturnType<typeof configFromEnv>> = {}) 
   };
 }
 
-async function createGroup(httpUrl: string, verifier: string, recoveryVerifier: string) {
+async function createGroup(
+  httpUrl: string,
+  verifier: string,
+  recoveryVerifier: string,
+  participantLimit?: GroupParticipantLimit
+) {
   const response = await fetch(`${httpUrl}/api/group-rooms`, {
     method: "POST",
     headers: { "content-type": "application/json", origin: httpUrl },
-    body: JSON.stringify({ ownerVerifier: verifier, ownerRecoveryVerifier: recoveryVerifier })
+    body: JSON.stringify({
+      ownerVerifier: verifier,
+      ownerRecoveryVerifier: recoveryVerifier,
+      ...(participantLimit === undefined ? {} : { participantLimit })
+    })
   });
   expect(response.status).toBe(201);
-  return response.json() as Promise<{ roomId: string; inviteToken: string; expiresAt: number }>;
+  return response.json() as Promise<{
+    roomId: string;
+    inviteToken: string;
+    expiresAt: number;
+    participantLimit: GroupParticipantLimit;
+  }>;
 }
 
 class GroupEventQueue {
@@ -302,11 +320,49 @@ afterEach(async () => {
 });
 
 describe("experimental group room lifecycle", () => {
-  it("seals a room for new joins while preserving E2E messaging, resume, Destroy, and aggregate metrics", async () => {
+  it("validates participant limits at creation and defaults omitted limits to ten", async () => {
+    const { httpUrl } = await start({ maxCreatesPerWindow: 100 });
+    const owner = ownerCredentials();
+    for (const participantLimit of [3, 4, 5, 6, 7, 8, 9, 10] as const) {
+      const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier, participantLimit);
+      expect(created.participantLimit).toBe(participantLimit);
+    }
+    expect((await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier)).participantLimit).toBe(10);
+
+    for (const participantLimit of [0, 1, 2, 11, -1, 3.5, "5", null]) {
+      const response = await fetch(`${httpUrl}/api/group-rooms`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: httpUrl },
+        body: JSON.stringify({
+          ownerVerifier: owner.verifier,
+          ownerRecoveryVerifier: owner.recoveryVerifier,
+          participantLimit
+        })
+      });
+      expect(response.status).toBe(400);
+    }
+    const malformed = await fetch(`${httpUrl}/api/group-rooms`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: httpUrl },
+      body: "{not-json"
+    });
+    expect(malformed.status).toBe(400);
+    const infinite = await fetch(`${httpUrl}/api/group-rooms`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: httpUrl },
+      body: JSON.stringify({
+        ownerVerifier: owner.verifier,
+        ownerRecoveryVerifier: owner.recoveryVerifier
+      }).replace("}", ',"participantLimit":1e309}')
+    });
+    expect(infinite.status).toBe(400);
+  });
+
+  it("auto-seals after admitting the third participant while messaging and grace resume remain live", async () => {
     await groupSodiumReady();
     const { server, httpUrl, wsUrl } = await start({ disconnectGraceMs: 500 });
     const owner = ownerCredentials();
-    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier, 3);
     const linkSecret = token();
     const a = await SecureGroupClient.connect(wsUrl, {
       type: "group_join",
@@ -317,7 +373,95 @@ describe("experimental group room lifecycle", () => {
       type: "group_join",
       inviteToken: created.inviteToken
     }, linkSecret);
-    await waitUntil(() => a.activeEpoch === 2 && b.activeEpoch === 2);
+    const c = await SecureGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken
+    }, linkSecret);
+    expect(a.session?.participantLimit).toBe(3);
+    await Promise.all([
+      a.events.waitFor("group_room_sealed"),
+      b.events.waitFor("group_room_sealed"),
+      c.events.waitFor("group_room_sealed")
+    ]);
+    await waitUntil(() => a.activeEpoch === 3 && b.activeEpoch === 3 && c.activeEpoch === 3);
+    expect(server.groupManager.currentCounts()).toMatchObject({ participants: 3, connected: 3 });
+    expect(server.groupManager.stats().inviteTokens).toBe(0);
+    expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(410);
+
+    const late = await RawGroupClient.connect(wsUrl, { type: "group_join", inviteToken: created.inviteToken });
+    await late.events.waitFor("group_room_gone");
+    c.sendMessage("auto-sealed-message", "still live after automatic seal");
+    await waitUntil(() => a.messages.some((message) => message.id === "auto-sealed-message"));
+    await waitUntil(() => b.messages.some((message) => message.id === "auto-sealed-message"));
+
+    const bSession = b.session!;
+    b.close();
+    const resumedB = await SecureGroupClient.connect(wsUrl, {
+      type: "group_resume",
+      roomId: bSession.roomId,
+      memberId: bSession.memberId,
+      resumeToken: bSession.resumeToken
+    }, linkSecret);
+    await waitUntil(() => a.activeEpoch === 4 && resumedB.activeEpoch === 4 && c.activeEpoch === 4);
+    expect(resumedB.session?.state).toBe("SEALED");
+    expect(resumedB.session?.participantLimit).toBe(3);
+
+    c.close();
+    await waitUntil(() => server.groupManager.currentCounts().participants === 2, 2_000);
+    expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(410);
+    const replacement = await RawGroupClient.connect(wsUrl, { type: "group_join", inviteToken: created.inviteToken });
+    await replacement.events.waitFor("group_room_gone");
+    expect(server.groupManager.currentCounts().participants).toBe(2);
+    const stats = await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot;
+    expect(stats.groups.totals.group_rooms_sealed).toBe(1);
+    a.send({ type: "group_destroy", ownerCapability: owner.capability });
+  });
+
+  it("auto-seals a four-person room only after its fourth admission", async () => {
+    const { server, httpUrl, wsUrl } = await start({ groupRekeyTimeoutMs: 60_000 });
+    const owner = ownerCredentials();
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier, 4);
+    const clients: RawGroupClient[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const client = await RawGroupClient.connect(wsUrl, {
+        type: "group_join",
+        inviteToken: created.inviteToken,
+        ...(index === 0 ? { ownerCapability: owner.capability } : {})
+      });
+      clients.push(client);
+      expect((await client.events.waitFor("group_session")).participantLimit).toBe(4);
+    }
+    expect(server.groupManager.hasActiveInvite(created.inviteToken)).toBe(true);
+    const fourth = await RawGroupClient.connect(wsUrl, { type: "group_join", inviteToken: created.inviteToken });
+    clients.push(fourth);
+    expect((await fourth.events.waitFor("group_session")).participantLimit).toBe(4);
+    await fourth.events.waitFor("group_room_sealed");
+    expect(server.groupManager.currentCounts().participants).toBe(4);
+    expect(server.groupManager.hasActiveInvite(created.inviteToken)).toBe(false);
+    for (const client of clients) client.close();
+  });
+
+  it("seals a room for new joins while preserving E2E messaging, resume, Destroy, and aggregate metrics", async () => {
+    await groupSodiumReady();
+    const { server, httpUrl, wsUrl } = await start({ disconnectGraceMs: 500 });
+    const owner = ownerCredentials();
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier, 7);
+    const linkSecret = token();
+    const a = await SecureGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      ownerCapability: owner.capability
+    }, linkSecret);
+    const b = await SecureGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken
+    }, linkSecret);
+    const c = await SecureGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken
+    }, linkSecret);
+    await waitUntil(() => a.activeEpoch === 3 && b.activeEpoch === 3 && c.activeEpoch === 3);
+    expect(a.session?.participantLimit).toBe(7);
 
     b.send({ type: "group_seal", ownerCapability: token() });
     await b.events.waitFor("group_forbidden");
@@ -326,9 +470,10 @@ describe("experimental group room lifecycle", () => {
     a.send({ type: "group_seal", ownerCapability: owner.capability });
     await Promise.all([
       a.events.waitFor("group_room_sealed"),
-      b.events.waitFor("group_room_sealed")
+      b.events.waitFor("group_room_sealed"),
+      c.events.waitFor("group_room_sealed")
     ]);
-    expect(server.groupManager.currentCounts()).toMatchObject({ rooms: 1, participants: 2, connected: 2 });
+    expect(server.groupManager.currentCounts()).toMatchObject({ rooms: 1, participants: 3, connected: 3 });
     expect(server.groupManager.stats().inviteTokens).toBe(0);
 
     const sealedInvite = await fetch(`${httpUrl}/g/${created.inviteToken}`);
@@ -341,7 +486,7 @@ describe("experimental group room lifecycle", () => {
       inviteToken: created.inviteToken
     });
     await late.events.waitFor("group_room_gone");
-    expect(server.groupManager.stats().participants).toBe(2);
+    expect(server.groupManager.stats().participants).toBe(3);
 
     a.sendMessage("sealed-a", "still encrypted after seal");
     await waitUntil(() => b.messages.some((message) => message.id === "sealed-a"));
@@ -361,7 +506,7 @@ describe("experimental group room lifecycle", () => {
       memberId: bSession.memberId,
       resumeToken: bSession.resumeToken
     }, linkSecret);
-    await waitUntil(() => a.activeEpoch === 3 && resumedB.activeEpoch === 3);
+    await waitUntil(() => a.activeEpoch === 4 && resumedB.activeEpoch === 4 && c.activeEpoch === 4);
     expect(resumedB.session?.state).toBe("SEALED");
     resumedB.sendMessage("resumed-sealed", "resume remains available");
     await waitUntil(() => a.messages.some((message) => message.id === "resumed-sealed"));
@@ -369,7 +514,8 @@ describe("experimental group room lifecycle", () => {
     a.send({ type: "group_destroy", ownerCapability: owner.capability });
     await Promise.all([
       a.events.waitFor("group_destroyed"),
-      resumedB.events.waitFor("group_destroyed")
+      resumedB.events.waitFor("group_destroyed"),
+      c.events.waitFor("group_destroyed")
     ]);
     expect(server.groupManager.stats()).toMatchObject({ activeRooms: 0, inviteTokens: 0, resumeTokens: 0 });
     expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(410);
@@ -493,7 +639,7 @@ describe("experimental group room lifecycle", () => {
     });
   });
 
-  it("reserves grace slots, survives owner disconnect, rejects spoofed control, and caps membership at ten", async () => {
+  it("reserves grace slots, rejects spoofed control, and irreversibly auto-seals at ten", async () => {
     const { server, httpUrl, wsUrl } = await start({ groupRekeyTimeoutMs: 60_000, disconnectGraceMs: 120 });
     const owner = ownerCredentials();
     const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
@@ -513,14 +659,14 @@ describe("experimental group room lifecycle", () => {
     expect(new Set(sessions.map((session) => session.persona.color)).size).toBe(10);
     expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot).groups).toMatchObject({
       now: { rooms: 1, participants: 10 },
-      totals: { group_participants_joined: 10 }
+      totals: { group_participants_joined: 10, group_rooms_sealed: 1 }
     });
 
     const eleventh = await RawGroupClient.connect(wsUrl, { type: "group_join", inviteToken: created.inviteToken });
-    expect((await eleventh.events.waitFor("group_room_full")).maxParticipants).toBe(10);
+    await eleventh.events.waitFor("group_room_gone");
     expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
       .groups.totals.group_participants_joined).toBe(10);
-    expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(200);
+    expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(410);
 
     const sender = clients[1]!;
     let currentEpoch: Pick<Extract<GroupServerEvent, { type: "group_epoch" }>, "epoch" | "rosterDigest"> = sessions[1]!;
@@ -560,7 +706,7 @@ describe("experimental group room lifecycle", () => {
     expect(server.groupManager.stats().activeRooms).toBe(1);
     expect((await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot)
       .groups.now.participants).toBe(9);
-    expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(200);
+    expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(410);
     for (const client of clients.slice(1)) client.close();
   });
 

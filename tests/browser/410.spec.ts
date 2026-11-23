@@ -29,6 +29,49 @@ async function installDeniedClipboard(context: BrowserContext): Promise<void> {
   });
 }
 
+async function installGroupSocketTracker(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    const TrackedWebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).endsWith("/group-ws")) {
+          (window as Window & { __groupTestSocket?: WebSocket }).__groupTestSocket = socket;
+        }
+        return socket;
+      }
+    });
+    Object.defineProperty(window, "WebSocket", { configurable: true, value: TrackedWebSocket });
+  });
+}
+
+async function installSealTransitionDrop(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    let dropped = false;
+    const TrackedWebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).endsWith("/group-ws")) {
+          socket.addEventListener("message", (message) => {
+            if (dropped) return;
+            try {
+              const event = JSON.parse(String(message.data)) as { type?: string };
+              if (event.type !== "group_room_sealed") return;
+              dropped = true;
+              window.setTimeout(() => socket.close(4499, "test post-seal sync"), 0);
+            } catch {
+              // Product code owns malformed-event handling; this hook observes only Seal.
+            }
+          });
+        }
+        return socket;
+      }
+    });
+    Object.defineProperty(window, "WebSocket", { configurable: true, value: TrackedWebSocket });
+  });
+}
+
 async function navigateDocument(page: Page, url: string) {
   const requested = new URL(url);
   const expectedDocumentUrl = `${requested.origin}${requested.pathname}${requested.search}`;
@@ -435,17 +478,22 @@ test("home is inert; Start creates exactly one room and copies its one-time link
   });
 
   await navigateDocument(page, baseURL!);
-  await expect(page.getByRole("heading", { name: "One link. Two people. Gone." })).toBeVisible();
-  expect(await page.locator(".start-headline > span").allTextContents()).toEqual(["One link.", "Two people.", "Gone."]);
+  await expect(page.getByRole("heading", { name: "One link. One room. Gone." })).toBeVisible();
+  expect(await page.locator(".start-headline > span").allTextContents()).toEqual(["One link.", "One room.", "Gone."]);
   await expect(page.getByText("A private conversation that exists once.", { exact: false })).toBeVisible();
   await expect(page.getByText("1-to-1 private chat · 30 minutes", { exact: true })).toBeVisible();
-  await expect(page.getByText("Experimental E2E · up to 10 people · 24 hours", { exact: true })).toBeVisible();
+  await expect(page.getByText("Experimental E2E · 24 hours", { exact: true })).toBeVisible();
   await expect(page.getByText("E2E encrypted · 2 people · 30 minutes", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "How it works →", exact: true })).toHaveAttribute("href", "/how-it-works");
   await expect(page.getByRole("link", { name: "Security →", exact: true })).toBeVisible();
   await expect(page.locator(".start-page a")).toHaveCount(2);
   await expect(page.getByRole("button", { name: "Create a room", exact: true })).toBeVisible();
-  await expect(page.locator(".start-page button")).toHaveCount(2);
+  await expect(page.locator(".group-limit-selector button")).toHaveCount(8);
+  await expect(page.locator(".group-limit-selector button[aria-pressed='true']")).toHaveText("10");
+  await page.locator(".group-limit-selector").getByRole("button", { name: "4", exact: true }).click();
+  await expect(page.locator(".group-limit-selector button[aria-pressed='true']")).toHaveText("4");
+  await page.locator(".group-limit-selector").getByRole("button", { name: "10", exact: true }).click();
+  await expect(page.locator(".start-page button")).toHaveCount(10);
   await expect(page.locator(".start-page nav")).toHaveCount(1);
   await expect(page.locator(".start-page footer, .start-page article")).toHaveCount(0);
 
@@ -529,6 +577,8 @@ test("home is inert; Start creates exactly one room and copies its one-time link
     const descriptions = Array.from(document.querySelectorAll<HTMLElement>(".start-action p"));
     const information = document.querySelector<HTMLElement>(".start-information-links")!;
     const security = document.querySelector<HTMLElement>(".start-security")!;
+    const selector = document.querySelector<HTMLElement>(".group-limit-selector")!;
+    const selectorButtons = Array.from(selector.querySelectorAll<HTMLElement>("button"));
     const contentRect = content.getBoundingClientRect();
     return {
       viewportWidth: innerWidth,
@@ -542,7 +592,9 @@ test("home is inert; Start creates exactly one room and copies its one-time link
       buttonRight: start.getBoundingClientRect().right,
       descriptionsRight: descriptions.map((description) => description.getBoundingClientRect().right),
       informationRight: information.getBoundingClientRect().right,
-      securityRight: security.getBoundingClientRect().right
+      securityRight: security.getBoundingClientRect().right,
+      selectorRight: selector.getBoundingClientRect().right,
+      selectorButtonHeights: selectorButtons.map((button) => button.getBoundingClientRect().height)
     };
   });
   expect(mobile.scrollWidth).toBeLessThanOrEqual(mobile.viewportWidth);
@@ -556,6 +608,8 @@ test("home is inert; Start creates exactly one room and copies its one-time link
   expect(mobile.descriptionsRight.every((right) => right <= mobile.viewportWidth)).toBe(true);
   expect(mobile.informationRight).toBeLessThanOrEqual(mobile.viewportWidth);
   expect(mobile.securityRight).toBeLessThanOrEqual(mobile.viewportWidth);
+  expect(mobile.selectorRight).toBeLessThanOrEqual(mobile.viewportWidth);
+  expect(mobile.selectorButtonHeights.every((height) => height >= 40)).toBe(true);
   await page.waitForTimeout(250);
   expect(creates).toBe(0);
 
@@ -579,7 +633,8 @@ test("home keeps direct parameters scoped when experimental group rooms are disa
   await expect(page.getByRole("button", { name: "Start", exact: true })).toBeVisible();
   await expect(page.getByText("1-to-1 private chat · 30 minutes", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Create a room", exact: true })).toHaveCount(0);
-  await expect(page.getByText("Experimental E2E · up to 10 people · 24 hours", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".group-limit-selector")).toHaveCount(0);
+  await expect(page.getByText("Experimental E2E · 24 hours", { exact: true })).toHaveCount(0);
   await expect(page.getByText("E2E encrypted · 2 people · 30 minutes", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "How it works →", exact: true })).toHaveAttribute("href", "/how-it-works");
   await expect(page.getByRole("link", { name: "Security →", exact: true })).toBeVisible();
@@ -855,7 +910,7 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
   await navigateDocument(creator, baseURL!);
   await creator.getByRole("button", { name: "Create a room", exact: true }).click();
   await expect(creator).toHaveURL(/\/g\/[A-Za-z0-9_-]{43}$/);
-  await expect(creator.getByText("1 person here", { exact: true })).toBeVisible();
+  await expect(creator.getByText("1/10 people here", { exact: true })).toBeVisible();
   await expect(creator.locator(".group-presence-event")).toHaveCount(0);
   const creatorPersona = await creator.locator(".group-self-persona strong").textContent();
   expect(creatorPersona).toBeTruthy();
@@ -882,7 +937,7 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
   const bContext = await browser.newContext();
   const b = await bContext.newPage();
   await openGroupInvite(b, invite);
-  await expect(creator.getByText("2 people here", { exact: true })).toBeVisible();
+  await expect(creator.getByText("2/10 people here", { exact: true })).toBeVisible();
   await expect(creator.locator("#group-message")).toBeEnabled();
   await expect(b.locator("#group-message")).toBeEnabled();
   const bPersona = (await b.locator(".group-self-persona strong").textContent())!;
@@ -900,7 +955,7 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
   const cContext = await browser.newContext();
   const c = await cContext.newPage();
   await openGroupInvite(c, invite);
-  await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
+  await expect(creator.getByText("3/10 people here", { exact: true })).toBeVisible();
   await expect(c.locator("#group-message")).toBeEnabled();
   await expect(c.getByText("before third participant", { exact: true })).toHaveCount(0);
   const cPersona = (await c.locator(".group-self-persona strong").textContent())!;
@@ -918,17 +973,17 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
   expect(sentFrames.join("\n")).not.toContain("after third participant");
 
   await cContext.close();
-  await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
+  await expect(creator.getByText("3/10 people here", { exact: true })).toBeVisible();
   await creator.waitForTimeout(500);
   await expect(creator.getByText(`${cPersona} left`, { exact: true })).toHaveCount(0);
-  await expect(creator.getByText("2 people here", { exact: true })).toBeVisible({ timeout: 8_000 });
+  await expect(creator.getByText("2/10 people here", { exact: true })).toBeVisible({ timeout: 8_000 });
   await expect(creator.getByText(`${cPersona} left`, { exact: true })).toHaveCount(1);
   await expect(b.getByText(`${cPersona} left`, { exact: true })).toHaveCount(1);
 
   const rejoinContext = await browser.newContext();
   const rejoined = await rejoinContext.newPage();
   await openGroupInvite(rejoined, invite);
-  await expect(creator.getByText("3 people here", { exact: true })).toBeVisible();
+  await expect(creator.getByText("3/10 people here", { exact: true })).toBeVisible();
   await expect(rejoined.locator("#group-message")).toBeEnabled();
   await expect(rejoined.locator(".message")).toHaveCount(0);
   const rejoinedPersona = (await rejoined.locator(".group-self-persona strong").textContent())!;
@@ -1008,6 +1063,84 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
   await rejoinContext.close();
 });
 
+test("a four-person room admits the final participant, auto-seals, and keeps encrypted messaging live", async ({ browser, context, page: creator, baseURL }) => {
+  await installWorkingClipboard(context);
+  await installSealTransitionDrop(context);
+  const before = await (await creator.request.get(`${baseURL}/__stats`)).json() as {
+    groups: { totals: Record<string, number> };
+  };
+  let requestedLimit: unknown;
+  creator.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/group-rooms") {
+      requestedLimit = request.postDataJSON().participantLimit;
+    }
+  });
+
+  await navigateDocument(creator, baseURL!);
+  await creator.locator(".group-limit-selector").getByRole("button", { name: "4", exact: true }).click();
+  await expect(creator.locator(".group-limit-selector button[aria-pressed='true']")).toHaveText("4");
+  await creator.getByRole("button", { name: "Create a room", exact: true }).click();
+  expect(requestedLimit).toBe(4);
+  await expect(creator.getByText("1/4 people here", { exact: true })).toBeVisible();
+  const invite = await creator.getByLabel("Reusable room link").inputValue();
+
+  const guestContexts = await Promise.all([0, 1, 2].map(() => browser.newContext()));
+  const guests = await Promise.all(guestContexts.map((guestContext) => guestContext.newPage()));
+  let finalGuestPersona = "";
+  for (let index = 0; index < guests.length; index += 1) {
+    await openGroupInvite(guests[index]!, invite);
+    await expect(creator.getByText(`${index + 2}/4 people here`, { exact: true })).toBeVisible();
+    if (index === guests.length - 1) {
+      finalGuestPersona = (await guests[index]!.locator(".group-self-persona strong").textContent()) || "";
+    }
+  }
+
+  await expect(creator.getByText("Sealed", { exact: true })).toBeVisible();
+  for (const guest of guests) await expect(guest.getByText("Sealed", { exact: true })).toBeVisible();
+  for (const roomPage of [creator, ...guests]) {
+    await expect(roomPage.locator(".group-presence-event").filter({
+      hasText: "Room sealed. No one else can join."
+    })).toHaveCount(1);
+  }
+  const creatorEvents = await creator.locator(".group-presence-event").allTextContents();
+  const finalJoinIndex = creatorEvents.lastIndexOf(`${finalGuestPersona} joined`);
+  expect(finalJoinIndex).toBeGreaterThanOrEqual(0);
+  expect(creatorEvents[finalJoinIndex + 1]).toBe("Room sealed. No one else can join.");
+  await expect(creator.getByRole("button", { name: "Invite", exact: true })).toHaveCount(0);
+  await expect(creator.getByRole("button", { name: "Seal room", exact: true })).toHaveCount(0);
+  await expect(creator.getByRole("button", { name: "Show QR", exact: true })).toHaveCount(0);
+
+  const finalGuest = guests.at(-1)!;
+  await finalGuest.locator("#group-message").fill("message after automatic seal");
+  await finalGuest.locator("#group-message").press("Enter");
+  await expect(creator.getByText("message after automatic seal", { exact: true })).toBeVisible();
+
+  const reloadGone = finalGuest.waitForResponse((response) =>
+    response.status() === 410 && response.request().resourceType() === "document"
+  );
+  await finalGuest.reload();
+  expect((await reloadGone).status()).toBe(410);
+  await waitForGone(finalGuest);
+  await guests[0]!.locator("#group-message").fill("remaining participants continue");
+  await guests[0]!.locator("#group-message").press("Enter");
+  await expect(creator.getByText("remaining participants continue", { exact: true })).toBeVisible();
+
+  const rejectedContext = await browser.newContext();
+  const rejected = await rejectedContext.newPage();
+  const goneResponse = await navigateDocument(rejected, invite);
+  expect(goneResponse.status()).toBe(410);
+  await waitForGone(rejected);
+  const after = await (await creator.request.get(`${baseURL}/__stats`)).json() as typeof before;
+  expect(after.groups.totals.group_rooms_sealed - before.groups.totals.group_rooms_sealed).toBe(1);
+
+  await creator.getByRole("button", { name: "Destroy room", exact: true }).click();
+  await creator.getByRole("dialog", { name: "Destroy this room?" })
+    .getByRole("button", { name: "Destroy room", exact: true }).click();
+  await waitForGone(creator);
+  await rejectedContext.close();
+  await Promise.all(guestContexts.map((guestContext) => guestContext.close()));
+});
+
 test("owner seals a room while admitted participants keep chatting and the old invite becomes HTTP 410", async ({ browser, context, page: creator, baseURL }) => {
   await installWorkingClipboard(context);
   const before = await (await creator.request.get(`${baseURL}/__stats`)).json() as {
@@ -1033,6 +1166,7 @@ test("owner seals a room while admitted participants keep chatting and the old i
   await creator.locator("#group-message").fill("before seal");
   await creator.locator("#group-message").press("Enter");
   await expect(peer.locator(".message").filter({ hasText: "before seal" })).toHaveCount(1);
+  const immediatelyBeforeSeal = await (await creator.request.get(`${baseURL}/__stats`)).json() as typeof before;
 
   const sealButton = creator.getByRole("button", { name: "Seal room", exact: true });
   await sealButton.click();
@@ -1042,6 +1176,17 @@ test("owner seals a room while admitted participants keep chatting and the old i
   await confirmSeal.click();
   await expect(creator.getByText("Sealed", { exact: true })).toHaveCount(1);
   await expect(peer.getByText("Sealed", { exact: true })).toHaveCount(1);
+  await expect(creator.locator(".group-presence-event").filter({
+    hasText: "Room sealed. No one else can join."
+  })).toHaveCount(1);
+  await expect(peer.locator(".group-presence-event").filter({
+    hasText: "Room sealed. No one else can join."
+  })).toHaveCount(1);
+  const immediatelyAfterSeal = await (await creator.request.get(`${baseURL}/__stats`)).json() as typeof before;
+  expect(
+    immediatelyAfterSeal.groups.totals.group_messages_relayed -
+    immediatelyBeforeSeal.groups.totals.group_messages_relayed
+  ).toBe(0);
   await expect(creator.getByRole("button", { name: "Invite", exact: true })).toHaveCount(0);
   await expect(creator.getByRole("button", { name: "Seal room", exact: true })).toHaveCount(0);
   await expect(creator.getByRole("button", { name: "Show QR", exact: true })).toHaveCount(0);
@@ -1087,7 +1232,7 @@ test("room personas persist per browser while tabs remain separate live particip
   const primary = await context.newPage();
   await navigateDocument(primary, baseURL!);
   await primary.getByRole("button", { name: "Create a room", exact: true }).click();
-  await expect(primary.getByText("1 person here", { exact: true })).toBeVisible();
+  await expect(primary.getByText("1/10 people here", { exact: true })).toBeVisible();
   const invite = await primary.getByLabel("Reusable room link").inputValue();
   const primaryName = (await primary.locator(".group-self-persona strong").textContent())!;
   const primaryStyle = await primary.locator(".group-self-persona strong").getAttribute("style");
@@ -1128,7 +1273,7 @@ test("room personas persist per browser while tabs remain separate live particip
   const rejectedTab = await context.newPage();
   await openGroupInvite(rejectedTab, invite);
   await expect(rejectedTab.getByRole("heading", { name: "Too many sessions from this browser." })).toBeVisible();
-  await expect(primary.getByText("3 people here", { exact: true })).toBeVisible();
+  await expect(primary.getByText("3/10 people here", { exact: true })).toBeVisible();
 
   const otherContext = await browser.newContext();
   const other = await otherContext.newPage();
@@ -1189,7 +1334,7 @@ test("room personas persist per browser while tabs remain separate live particip
   expect(recoveredOwnerCapability).not.toBe(owner.ownerCapability);
 
   await secondTab.close();
-  await expect(returnedPrimary.getByText("3 people here", { exact: true })).toBeVisible({ timeout: 8_000 });
+  await expect(returnedPrimary.getByText("3/10 people here", { exact: true })).toBeVisible({ timeout: 8_000 });
   await expect(returnedPrimary.getByText(`${secondName} left`, { exact: true })).toHaveCount(1);
   const replacementEphemeral = await context.newPage();
   await openGroupInvite(replacementEphemeral, invite);
@@ -1225,23 +1370,12 @@ test("room personas persist per browser while tabs remain separate live particip
   await otherContext.close();
 });
 
-test("group transport resume inside grace does not emit presence noise", async ({ browser, baseURL }) => {
+test("group transport resume inside grace does not duplicate presence or seal notices", async ({ browser, baseURL }) => {
   const creatorContext = await browser.newContext();
   await installWorkingClipboard(creatorContext);
+  await installGroupSocketTracker(creatorContext);
   const participantContext = await browser.newContext();
-  await participantContext.addInitScript(() => {
-    const NativeWebSocket = window.WebSocket;
-    const TrackedWebSocket = new Proxy(NativeWebSocket, {
-      construct(target, args) {
-        const socket = Reflect.construct(target, args) as WebSocket;
-        if (String(args[0]).endsWith("/group-ws")) {
-          (window as Window & { __groupTestSocket?: WebSocket }).__groupTestSocket = socket;
-        }
-        return socket;
-      }
-    });
-    Object.defineProperty(window, "WebSocket", { configurable: true, value: TrackedWebSocket });
-  });
+  await installGroupSocketTracker(participantContext);
   const creator = await creatorContext.newPage();
   const participant = await participantContext.newPage();
 
@@ -1258,6 +1392,25 @@ test("group transport resume inside grace does not emit presence noise", async (
     return session?.resumeToken;
   });
 
+  await creator.getByRole("button", { name: "Seal room", exact: true }).click();
+  await creator.getByRole("dialog", { name: "Seal this room?" })
+    .getByRole("button", { name: "Seal", exact: true }).click();
+  for (const roomPage of [creator, participant]) {
+    await expect(roomPage.getByText("Room sealed. No one else can join.", { exact: true })).toHaveCount(1);
+  }
+  await creator.evaluate(() => {
+    const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as {
+      ownerCapability?: string;
+    } | null;
+    if (!session?.ownerCapability) throw new Error("Owner capability unavailable");
+    (window as Window & { __groupTestSocket?: WebSocket }).__groupTestSocket?.send(JSON.stringify({
+      type: "group_seal",
+      ownerCapability: session.ownerCapability
+    }));
+  });
+  await creator.waitForTimeout(100);
+  await expect(creator.getByText("Room sealed. No one else can join.", { exact: true })).toHaveCount(1);
+
   await participant.evaluate(() => {
     (window as Window & { __groupTestSocket?: WebSocket }).__groupTestSocket?.close(4499, "test transport drop");
   });
@@ -1268,10 +1421,11 @@ test("group transport resume inside grace does not emit presence noise", async (
     return session?.resumeToken;
   }), { timeout: 10_000 }).not.toBe(resumeTokenBefore);
   await expect(participant.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
-  await expect(creator.getByText("2 people here", { exact: true })).toBeVisible();
+  await expect(creator.getByText("2/10 people here", { exact: true })).toBeVisible();
   await expect(creator.getByText(`${participantName} joined`, { exact: true })).toHaveCount(1);
   await expect(creator.getByText(`${participantName} left`, { exact: true })).toHaveCount(0);
-  await expect(participant.locator(".group-presence-event")).toHaveCount(0);
+  await expect(creator.getByText("Room sealed. No one else can join.", { exact: true })).toHaveCount(1);
+  await expect(participant.getByText("Room sealed. No one else can join.", { exact: true })).toHaveCount(1);
 
   const creatorGone = creator.waitForResponse((response) =>
     response.status() === 410 && response.request().resourceType() === "document"

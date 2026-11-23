@@ -129,9 +129,13 @@ orphan random token has no live server mapping after destruction.
 
 ## Room and membership lifecycle
 
-The room lifecycle is `OPEN → SEALED → DESTROYED`. The creator may
-irreversibly Seal the room; this removes its invite from the admission index
-without disconnecting admitted members or changing the current crypto epoch.
+The room lifecycle is `OPEN → SEALED → DESTROYED`. At creation, the creator
+chooses an immutable participant limit from 3 through 10, with 10 used for
+older clients that omit the field. The creator counts toward that limit. The
+creator may irreversibly Seal the room early, or the relay automatically uses
+the same Seal transition immediately after successfully admitting the final
+allowed participant. Seal removes the invite from the admission index without
+disconnecting admitted members or changing the current crypto epoch.
 Manual destruction and the absolute 24-hour TTL remain valid from either live
 state. The TTL begins at creation and is never extended. The relay stores no
 messages, backlog or replay buffer.

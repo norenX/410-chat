@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  GROUP_PARTICIPANT_LIMITS,
   GROUP_PERSONA_COLORS,
   type GroupClientCommand,
   type GroupMemberPersona,
@@ -14,9 +15,11 @@ import {
   type GroupDecryptedMessage
 } from "./group-crypto-session";
 import {
+  appendRoomSealedNotice,
   createActivePersonaRoster,
   diffActivePersonaRosters,
-  type ActivePersonaRoster
+  type ActivePersonaRoster,
+  type GroupSystemNotice
 } from "./group-presence";
 import { QrInviteDialog } from "./QrInviteDialog";
 
@@ -56,13 +59,7 @@ interface GroupMessage {
   authorColor?: string;
 }
 
-interface GroupPresenceItem {
-  kind: "presence";
-  id: string;
-  text: string;
-}
-
-type GroupStreamItem = GroupMessage | GroupPresenceItem;
+type GroupStreamItem = GroupMessage | GroupSystemNotice;
 
 interface PendingRelay {
   relayId: string;
@@ -261,6 +258,7 @@ export function GroupRoomApp() {
   const [view, setView] = useState<GroupView>("connecting");
   const [presenceCount, setPresenceCount] = useState(0);
   const [maxParticipants, setMaxParticipants] = useState(10);
+  const [participantLimit, setParticipantLimit] = useState(10);
   const [ownerAuthorized, setOwnerAuthorized] = useState(false);
   const [expiresAt, setExpiresAt] = useState(0);
   const [remaining, setRemaining] = useState(0);
@@ -300,6 +298,8 @@ export function GroupRoomApp() {
   const browserVerifierRef = useRef("");
   const tabVerifierRef = useRef("");
   const ownerRecoverySecretRef = useRef("");
+  const roomSealedNoticePendingRef = useRef(false);
+  const roomSealedNoticeSeenRef = useRef(false);
   const personaMapRef = useRef(new Map<string, GroupPersona>());
   const activePersonaRosterRef = useRef<ActivePersonaRoster | undefined>(undefined);
   const pendingPersonaRosterRef = useRef<{
@@ -399,6 +399,11 @@ export function GroupRoomApp() {
               ));
             }
           }
+          if (roomSealedNoticePendingRef.current && !roomSealedNoticeSeenRef.current) {
+            roomSealedNoticePendingRef.current = false;
+            roomSealedNoticeSeenRef.current = true;
+            setMessages((current) => appendRoomSealedNotice(current, MAX_RENDERED_MESSAGES));
+          }
           setNotice("");
           setView("active");
         },
@@ -490,6 +495,14 @@ export function GroupRoomApp() {
       setShareOpen(false);
       setQrOpen(false);
       setCopyState("idle");
+      if (!roomSealedNoticeSeenRef.current && !roomSealedNoticePendingRef.current) {
+        if (cryptoRef.current?.state === "REKEYING") {
+          roomSealedNoticePendingRef.current = true;
+        } else {
+          roomSealedNoticeSeenRef.current = true;
+          setMessages((current) => appendRoomSealedNotice(current, MAX_RENDERED_MESSAGES));
+        }
+      }
       return;
     }
     if (event.type === "group_rate_limited") {
@@ -554,10 +567,23 @@ export function GroupRoomApp() {
       fullRef.current = false;
       setOwnerAuthorized(event.ownerAuthorized);
       setSealed(event.state === "SEALED");
+      if (
+        event.state === "SEALED" &&
+        !roomSealedNoticePendingRef.current &&
+        !roomSealedNoticeSeenRef.current
+      ) {
+        // A session sync describes current state; it is not a replayable Seal event.
+        // Preserve a realtime transition that is still waiting for the active epoch.
+        roomSealedNoticeSeenRef.current = true;
+      }
       if (!validPersona(event.persona)) throw new Error("Invalid self persona");
+      if (!(GROUP_PARTICIPANT_LIMITS as readonly number[]).includes(event.participantLimit)) {
+        throw new Error("Invalid participant limit");
+      }
       setSelfPersona({ ...event.persona });
       setPresenceCount(event.presenceCount);
       setMaxParticipants(event.maxParticipants);
+      setParticipantLimit(event.participantLimit);
       setExpiresAt(event.expiresAt);
       setRemaining(event.expiresAt - Date.now());
       setShareOpen(event.state === "OPEN" && existing.showInviteOnLoad === true);
@@ -883,7 +909,7 @@ export function GroupRoomApp() {
   }
 
   const canSend = view === "active" && presenceCount >= 2 && !sendPending;
-  const peopleText = `${presenceCount} ${presenceCount === 1 ? "person" : "people"} here`;
+  const peopleText = `${presenceCount}/${participantLimit} people here`;
 
   return (
     <main className="group-room-page">

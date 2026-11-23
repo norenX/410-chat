@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { GROUP_PARTICIPANT_LIMITS, type GroupParticipantLimit } from "../../shared/group-protocol.js";
 import type { ClientCommand, Role, ServerEvent } from "../../shared/protocol.js";
 import { CryptoSession, createLinkSecret, sodiumReady, type DecryptedMessage } from "./crypto-session";
 import { AdminStatsPage } from "./AdminStatsPage";
@@ -151,6 +152,7 @@ function DirectChatApp() {
   const [infoPanel, setInfoPanel] = useState<InfoPanel>(null);
   const [qrOpen, setQrOpen] = useState(false);
   const [groupRoomsEnabled, setGroupRoomsEnabled] = useState(false);
+  const [groupParticipantLimit, setGroupParticipantLimit] = useState<GroupParticipantLimit>(10);
 
   const socketRef = useRef<WebSocket | undefined>(undefined);
   const cryptoRef = useRef<CryptoSession | undefined>(undefined);
@@ -544,7 +546,8 @@ function DirectChatApp() {
         },
         body: JSON.stringify({
           ownerVerifier: ownerCapabilityVerifier,
-          ownerRecoveryVerifier
+          ownerRecoveryVerifier,
+          participantLimit: groupParticipantLimit
         })
       });
       if (response.status === 429) {
@@ -616,7 +619,7 @@ function DirectChatApp() {
           <Logo />
           <h1 className="start-headline">
             <span>One link.</span>
-            <span>Two people.</span>
+            <span>One room.</span>
             <span>Gone.</span>
           </h1>
           <p className="intro start-intro">A private conversation that exists once.<br />No account. No history.</p>
@@ -627,8 +630,23 @@ function DirectChatApp() {
             </div>
             {groupRoomsEnabled && (
               <div className="start-action">
+                <fieldset className="group-limit-selector">
+                  <legend>People</legend>
+                  <div>
+                    {GROUP_PARTICIPANT_LIMITS.map((limit) => (
+                      <button
+                        key={limit}
+                        type="button"
+                        aria-pressed={groupParticipantLimit === limit}
+                        onClick={() => setGroupParticipantLimit(limit)}
+                      >
+                        {limit}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
                 <button className="secondary-action" type="button" onClick={startGroupRoom} aria-describedby="group-action-description">Create a room</button>
-                <p id="group-action-description">Experimental E2E · up to 10 people · 24 hours</p>
+                <p id="group-action-description">Experimental E2E · 24 hours</p>
               </div>
             )}
           </div>

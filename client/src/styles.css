@@ -118,6 +118,53 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 
 .start-action + .start-action { margin-top: 22px; }
 
+.group-limit-selector {
+  min-width: 0;
+  margin: 0 0 10px;
+  border: 0;
+  padding: 0;
+}
+
+.group-limit-selector legend {
+  margin: 0 0 7px;
+  padding: 0;
+  color: #555;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.group-limit-selector > div {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.group-limit-selector button {
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid #aaa;
+  background: #fff;
+  color: #111;
+  padding: 6px 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.group-limit-selector button:hover { border-color: #111; }
+
+.group-limit-selector button[aria-pressed="true"] {
+  border-color: #111;
+  background: #111;
+  color: #fff;
+  font-weight: 700;
+}
+
+.group-limit-selector button:focus-visible {
+  outline: 2px solid #111;
+  outline-offset: 2px;
+}
+
 .start-page .secondary-action {
   width: 100%;
   min-height: 54px;
@@ -941,6 +988,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .start-page .start-headline { font-size: clamp(42px, 12vw, 47px); }
   .start-page .start-intro { margin-top: 25px; font-size: 18px; }
   .start-actions { width: 100%; }
+  .group-limit-selector > div { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .group-limit-selector button { min-height: 42px; }
   .start-page .primary-action { width: 100%; min-height: 58px; margin-top: 30px; }
   .security-page { padding: 44px 24px 64px; }
   .security-header { margin-bottom: 56px; }

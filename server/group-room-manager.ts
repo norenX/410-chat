@@ -6,6 +6,7 @@ import {
   type GroupClientCommand,
   type GroupEpochDescriptor,
   type GroupMemberPersona,
+  type GroupParticipantLimit,
   type GroupPersona,
   type GroupRoomPhase,
   type GroupRoomState,
@@ -16,6 +17,7 @@ import { allocateGroupPersona } from "./group-persona.js";
 
 export const GROUP_HARD_TTL_MS = 24 * 60 * 60 * 1000;
 export const GROUP_MAX_PARTICIPANTS = 10;
+export const GROUP_DEFAULT_PARTICIPANT_LIMIT: GroupParticipantLimit = 10;
 export const GROUP_MAX_BROWSER_SESSIONS = 3;
 
 export interface GroupRoomManagerConfig {
@@ -76,6 +78,7 @@ export interface CreateGroupRoomResult {
   roomId: string;
   inviteToken: string;
   expiresAt: number;
+  participantLimit: GroupParticipantLimit;
 }
 
 interface GroupMember {
@@ -117,6 +120,7 @@ interface GroupRoom {
   source: TrafficSource;
   state: GroupRoomState;
   phase: GroupRoomPhase;
+  participantLimit: GroupParticipantLimit;
   inviteHash: Buffer;
   ownerVerifier: Buffer;
   ownerRecoveryVerifier: Buffer;
@@ -186,6 +190,10 @@ function decodeVerifier(value: string): Buffer | null {
 
 function hashesEqual(left: Buffer, right: Buffer | null): boolean {
   return Boolean(right && left.length === right.length && timingSafeEqual(left, right));
+}
+
+export function isGroupParticipantLimit(value: unknown): value is GroupParticipantLimit {
+  return Number.isSafeInteger(value) && (value as number) >= 3 && (value as number) <= GROUP_MAX_PARTICIPANTS;
 }
 
 function parseGroupCommand(raw: string): GroupClientCommand | null {
@@ -398,8 +406,10 @@ export class GroupRoomManager {
     ownerVerifier: string,
     ownerRecoveryVerifier: string,
     now = Date.now(),
-    source: TrafficSource = "direct"
+    source: TrafficSource = "direct",
+    participantLimit: GroupParticipantLimit = GROUP_DEFAULT_PARTICIPANT_LIMIT
   ): CreateGroupRoomResult | null {
+    if (!isGroupParticipantLimit(participantLimit)) throw new Error("Invalid group participant limit");
     const verifier = decodeVerifier(ownerVerifier);
     const recoveryVerifier = decodeVerifier(ownerRecoveryVerifier);
     if (!verifier || !recoveryVerifier) {
@@ -430,6 +440,7 @@ export class GroupRoomManager {
       source,
       state: "OPEN",
       phase: "ACTIVE",
+      participantLimit,
       inviteHash,
       ownerVerifier: verifier,
       ownerRecoveryVerifier: recoveryVerifier,
@@ -452,7 +463,7 @@ export class GroupRoomManager {
     this.rooms.set(roomId, room);
     this.inviteIndex.set(inviteHash.toString("hex"), roomId);
     this.hooks.onRoomCreated?.(source);
-    return { roomId, inviteToken, expiresAt };
+    return { roomId, inviteToken, expiresAt, participantLimit };
   }
 
   hasActiveInvite(inviteToken: string, now = Date.now()): boolean {
@@ -558,11 +569,10 @@ export class GroupRoomManager {
       socket.close(4410, "browser session limit");
       return false;
     }
-    if (room.members.size >= this.config.maxParticipants) {
+    if (room.members.size >= room.participantLimit) {
       browserHash.fill(0);
       tabHash.fill(0);
-      this.send(socket, { type: "group_room_full", maxParticipants: this.config.maxParticipants });
-      socket.close(4409, "room full");
+      this.gone(socket);
       return false;
     }
     let primaryPersona = primary;
@@ -629,6 +639,7 @@ export class GroupRoomManager {
     this.broadcastEpoch(room, socket);
     this.broadcastPresence(room);
     this.hooks.onParticipantJoined?.(room.source);
+    if (room.members.size === room.participantLimit) this.sealRoom(room);
     return true;
   }
 
@@ -983,9 +994,9 @@ export class GroupRoomManager {
     return true;
   }
 
-  private sealRoom(room: GroupRoom, requester: WebSocket): void {
+  private sealRoom(room: GroupRoom, requester?: WebSocket): void {
     if (room.state === "SEALED") {
-      this.send(requester, { type: "group_room_sealed" });
+      if (requester) this.send(requester, { type: "group_room_sealed" });
       return;
     }
     if (room.state !== "OPEN") return;
@@ -1166,6 +1177,7 @@ export class GroupRoomManager {
       heartbeatEveryMs: this.config.heartbeatEveryMs,
       disconnectGraceMs: this.config.disconnectGraceMs,
       maxParticipants: this.config.maxParticipants,
+      participantLimit: room.participantLimit,
       presenceCount: room.members.size,
       persona: { ...member.persona },
       personaKind: member.personaKind,
