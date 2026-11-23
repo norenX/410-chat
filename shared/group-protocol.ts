@@ -1,4 +1,4 @@
-export type GroupRoomState = "OPEN" | "DESTROYED";
+export type GroupRoomState = "OPEN" | "SEALED" | "DESTROYED";
 export type GroupRoomPhase = "REKEYING" | "ACTIVE";
 
 export interface GroupEpochDescriptor {
@@ -58,6 +58,7 @@ export type GroupClientCommand =
     }
   | { type: "group_ready"; epoch: number; rosterDigest: string; epochDigest: string }
   | { type: "group_relay"; relayId: string; epoch: number; epochDigest: string; data: string }
+  | { type: "group_seal"; ownerCapability: string }
   | { type: "group_destroy"; ownerCapability: string }
   | { type: "group_owner_destroy"; roomId: string; ownerCapability: string };
 
@@ -71,7 +72,7 @@ export type GroupServerEvent =
       resumeToken: string;
       ownerAuthorized: boolean;
       ownerCapability?: string;
-      state: "OPEN";
+      state: "OPEN" | "SEALED";
       phase: GroupRoomPhase;
       expiresAt: number;
       heartbeatEveryMs: number;
@@ -90,6 +91,7 @@ export type GroupServerEvent =
   | { type: "group_relay"; epoch: number; epochDigest: string; from: string; data: string }
   | { type: "group_relay_accepted"; relayId: string }
   | { type: "group_relay_rejected"; relayId: string; reason: "rate_limited" | "unavailable" | "invalid" }
+  | { type: "group_room_sealed" }
   | { type: "group_destroyed" }
   | { type: "group_room_gone"; message: string }
   | { type: "group_room_full"; maxParticipants: number }

@@ -37,20 +37,21 @@ class FakeSocket extends EventEmitter {
 
 const managers: GroupRoomManager[] = [];
 
-function room(manager: GroupRoomManager): { inviteToken: string } {
+function room(manager: GroupRoomManager): { inviteToken: string; capability: string } {
   const capability = randomBytes(32);
   const verifier = createHash("sha256").update(capability).digest("base64url");
   const recoveryVerifier = createHash("sha256").update(randomBytes(32)).digest("base64url");
-  return manager.createRoom(verifier, recoveryVerifier)!;
+  return { ...manager.createRoom(verifier, recoveryVerifier)!, capability: capability.toString("base64url") };
 }
 
-function join(manager: GroupRoomManager, socket: FakeSocket, inviteToken: string): void {
+function join(manager: GroupRoomManager, socket: FakeSocket, inviteToken: string, ownerCapability?: string): void {
   manager.acceptSocket(socket as unknown as WebSocket);
   socket.receive({
     type: "group_join",
     inviteToken,
     browserVerifier: randomBytes(32).toString("base64url"),
-    tabVerifier: randomBytes(32).toString("base64url")
+    tabVerifier: randomBytes(32).toString("base64url"),
+    ...(ownerCapability ? { ownerCapability } : {})
   });
 }
 
@@ -142,5 +143,39 @@ describe("GroupRoomManager hardening", () => {
 
     expect(offender.closeCode).toBe(4400);
     expect(peer.readyState).toBe(1);
+  });
+
+  it("seals admission atomically, preserves admitted sockets, and counts only the first owner seal", () => {
+    let sealedCount = 0;
+    const manager = new GroupRoomManager(
+      { rekeyTimeoutMs: 60_000 },
+      { onSealed: () => { sealedCount += 1; } }
+    );
+    managers.push(manager);
+    const created = room(manager);
+    const owner = new FakeSocket();
+    const admitted = new FakeSocket();
+    join(manager, owner, created.inviteToken, created.capability);
+    join(manager, admitted, created.inviteToken);
+
+    admitted.receive({ type: "group_seal", ownerCapability: randomBytes(32).toString("base64url") });
+    expect(admitted.sent.at(-1)?.type).toBe("group_forbidden");
+    expect(manager.hasActiveInvite(created.inviteToken)).toBe(true);
+
+    owner.receive({ type: "group_seal", ownerCapability: created.capability });
+    expect(owner.sent.some((event) => event.type === "group_room_sealed")).toBe(true);
+    expect(admitted.sent.some((event) => event.type === "group_room_sealed")).toBe(true);
+    expect(manager.hasActiveInvite(created.inviteToken)).toBe(false);
+    expect(manager.currentCounts()).toMatchObject({ rooms: 1, participants: 2, connected: 2 });
+    expect(sealedCount).toBe(1);
+
+    const late = new FakeSocket();
+    join(manager, late, created.inviteToken);
+    expect(late.sent.at(-1)?.type).toBe("group_room_gone");
+    expect(manager.currentCounts()).toMatchObject({ participants: 2, connected: 2 });
+
+    owner.receive({ type: "group_seal", ownerCapability: created.capability });
+    expect(owner.sent.at(-1)?.type).toBe("group_room_sealed");
+    expect(sealedCount).toBe(1);
   });
 });

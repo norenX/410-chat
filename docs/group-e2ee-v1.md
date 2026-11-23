@@ -129,9 +129,12 @@ orphan random token has no live server mapping after destruction.
 
 ## Room and membership lifecycle
 
-The room is `OPEN` until manual destruction or its absolute 24-hour TTL. The
-TTL begins at creation and is never extended. The relay stores no messages,
-backlog or replay buffer.
+The room lifecycle is `OPEN → SEALED → DESTROYED`. The creator may
+irreversibly Seal the room; this removes its invite from the admission index
+without disconnecting admitted members or changing the current crypto epoch.
+Manual destruction and the absolute 24-hour TTL remain valid from either live
+state. The TTL begins at creation and is never extended. The relay stores no
+messages, backlog or replay buffer.
 
 Membership change handling is:
 
@@ -149,8 +152,10 @@ Membership change handling is:
    the older socket, which is prevented from automatically resuming again.
 4. Grace expiry removes the member, erases its resume state, and starts a fresh
    full-group epoch for the remaining connected members.
-5. Opening the reusable invite after removal creates a new live member with
-   fresh credentials and a fresh full-group epoch.
+5. While the room is `OPEN`, opening the reusable invite after removal creates
+   a new live member with fresh credentials and a fresh full-group epoch.
+   Once `SEALED`, only a valid resume for an existing grace slot is admitted;
+   new join attempts receive the ordinary unavailable-room response.
 
 Application sending is disabled during `REKEYING`. If the bounded rekey timer
 expires, the room remains fail-closed in `REKEYING`; the relay does not infer
@@ -383,18 +388,20 @@ remaining members successfully activate the removal epoch. The removed member
 does not receive the fresh X25519 announcements/pairwise keys as a current
 member and cannot unwrap new content keys.
 
-An invite holder can immediately rejoin as a new member. That new member may
-read messages sent after its new join epoch is active, but still receives no
-prior message history.
+While the room remains `OPEN`, an invite holder can immediately rejoin as a
+new member. That new member may read messages sent after its new join epoch is
+active, but still receives no prior message history. Seal disables that future
+admission without changing keys or access for members already in the room.
 
 ## Destruction and cleanup
 
+Seal removes and zeroes the invite index/hash immediately, so the old
+`/g/<invite>` returns the same real HTTP 410 response as any other unavailable
+well-formed group invite while existing sockets and resume slots remain live.
 Manual owner destruction and TTL destruction synchronously remove the room,
-invite index, resume indexes and socket contexts before best-effort network
-notification. Timers and rate-limit arrays are cleared; verifier and resume
-hash buffers are zeroed; sockets are closed. The old `/g/<invite>` then returns
-the same real HTTP 410 response as any other unavailable well-formed group
-invite. No tombstone database is created.
+resume indexes and socket contexts before best-effort network notification.
+Timers and rate-limit arrays are cleared; verifier and resume hash buffers are
+zeroed; sockets are closed. No tombstone database is created.
 
 ## Known limitations
 
@@ -415,7 +422,9 @@ invite. No tombstone database is created.
   The relay can correlate tabs that present the same room-scoped browser
   verifier while that room is live, but the verifier is not reused across
   rooms and is not included in aggregate metrics.
-- The reusable invite holder can re-enter as a new participant.
+- While a room is open, the reusable invite holder can re-enter as a new
+  participant. Seal prevents subsequent joins but cannot revoke plaintext or
+  keys already held by admitted participants.
 - Exact next-sequence enforcement intentionally fails closed if a malicious
   relay selectively drops a frame after acknowledging it. Ordinary
   server-side rejection cannot create this gap because sequences are committed

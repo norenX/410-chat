@@ -132,12 +132,14 @@ describe("410 lifecycle", () => {
         group_rooms_created: 0,
         group_participants_joined: 0,
         group_messages_relayed: 0,
+        group_rooms_sealed: 0,
         group_responses_410: 0
       },
       totals: {
         group_rooms_created: 0,
         group_participants_joined: 0,
         group_messages_relayed: 0,
+        group_rooms_sealed: 0,
         group_responses_410: 0
       }
     });

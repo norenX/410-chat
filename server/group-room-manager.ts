@@ -67,6 +67,7 @@ export interface GroupRoomManagerHooks {
   onParticipantJoined?: (source: TrafficSource) => void;
   onConversationStarted?: (source: TrafficSource) => void;
   onMessageRelayed?: (source: TrafficSource) => void;
+  onSealed?: () => void;
   onDestroyed?: (reason: GroupDestructionReason) => void;
   onEpochChanged?: (roomId: string, epoch: number, rosterDigest: string) => void;
 }
@@ -279,6 +280,9 @@ function parseGroupCommand(raw: string): GroupClientCommand | null {
   }
   if (record.type === "group_destroy" && ownerCapability && exactKeys(record, ["type", "ownerCapability"])) {
     return { type: "group_destroy", ownerCapability };
+  }
+  if (record.type === "group_seal" && ownerCapability && exactKeys(record, ["type", "ownerCapability"])) {
+    return { type: "group_seal", ownerCapability };
   }
   if (
     record.type === "group_owner_destroy" && typeof record.roomId === "string" && ownerCapability &&
@@ -704,6 +708,14 @@ export class GroupRoomManager {
       this.destroyRoom(room.id, "manual");
       return;
     }
+    if (command.type === "group_seal") {
+      if (!this.ownerMatches(room, command.ownerCapability)) {
+        this.send(socket, { type: "group_forbidden" });
+        return;
+      }
+      this.sealRoom(room, socket);
+      return;
+    }
     if (command.type === "group_ready") {
       this.handleReady(room, member, socket, command.epoch, command.rosterDigest, command.epochDigest);
       return;
@@ -902,7 +914,7 @@ export class GroupRoomManager {
     const room = this.rooms.get(context.roomId);
     const member = room?.members.get(context.memberId);
     if (
-      !room || room.state !== "OPEN" || !member || member.socket !== socket ||
+      !room || room.state === "DESTROYED" || !member || member.socket !== socket ||
       member.connectionGeneration !== context.generation
     ) return;
     member.connected = false;
@@ -971,6 +983,19 @@ export class GroupRoomManager {
     return true;
   }
 
+  private sealRoom(room: GroupRoom, requester: WebSocket): void {
+    if (room.state === "SEALED") {
+      this.send(requester, { type: "group_room_sealed" });
+      return;
+    }
+    if (room.state !== "OPEN") return;
+    room.state = "SEALED";
+    this.inviteIndex.delete(room.inviteHash.toString("hex"));
+    room.inviteHash.fill(0);
+    this.broadcast(room, { type: "group_room_sealed" });
+    this.hooks.onSealed?.();
+  }
+
   destroyRoom(roomId: string, reason: GroupDestructionReason): boolean {
     const room = this.rooms.get(roomId);
     if (!room || room.state === "DESTROYED") return false;
@@ -1018,13 +1043,13 @@ export class GroupRoomManager {
     const inviteHash = sha256(inviteToken);
     const roomId = this.inviteIndex.get(inviteHash.toString("hex"));
     const room = roomId ? this.liveRoom(roomId, now) : undefined;
-    if (!room || !timingSafeEqual(room.inviteHash, inviteHash)) return undefined;
+    if (!room || room.state !== "OPEN" || !timingSafeEqual(room.inviteHash, inviteHash)) return undefined;
     return room;
   }
 
   private liveRoom(roomId: string, now = Date.now()): GroupRoom | undefined {
     const room = this.rooms.get(roomId);
-    if (!room || room.state !== "OPEN") return undefined;
+    if (!room || room.state === "DESTROYED") return undefined;
     if (now >= room.expiresAt) {
       this.destroyRoom(room.id, "ttl");
       return undefined;
@@ -1101,7 +1126,7 @@ export class GroupRoomManager {
 
   private expireUnreadyMembers(roomId: string, epoch: number): void {
     const room = this.rooms.get(roomId);
-    if (!room || room.state !== "OPEN" || room.epoch !== epoch || room.phase !== "REKEYING") return;
+    if (!room || room.state === "DESTROYED" || room.epoch !== epoch || room.phase !== "REKEYING") return;
     room.rekeyTimer = undefined;
     this.broadcast(room, { type: "group_epoch_failed", epoch: room.epoch, rosterDigest: room.rosterDigest });
   }
@@ -1135,7 +1160,7 @@ export class GroupRoomManager {
       resumeToken,
       ownerAuthorized: member.ownerAuthorized,
       ...(ownerCapability ? { ownerCapability } : {}),
-      state: "OPEN",
+      state: room.state === "SEALED" ? "SEALED" : "OPEN",
       phase: room.phase,
       expiresAt: room.expiresAt,
       heartbeatEveryMs: this.config.heartbeatEveryMs,

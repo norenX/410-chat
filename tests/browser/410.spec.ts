@@ -241,12 +241,14 @@ test("admin stats polls aggregate direct and group counters without losing the l
         group_rooms_created: 2,
         group_participants_joined: 6,
         group_messages_relayed: 8,
+        group_rooms_sealed: 1,
         group_responses_410: 3
       },
       totals: {
         group_rooms_created: 9,
         group_participants_joined: 22,
         group_messages_relayed: 44,
+        group_rooms_sealed: 5,
         group_responses_410: 11
       }
     },
@@ -285,8 +287,8 @@ test("admin stats polls aggregate direct and group counters without losing the l
   await expect(direct.locator(".admin-stats-period").nth(1).locator("dd")).toHaveText(["12", "3", "2", "7", "4"]);
   await expect(direct.locator(".admin-stats-period").nth(2).locator("dd")).toHaveText(["120", "30", "20", "70", "40"]);
   await expect(group.locator(".admin-stats-period").nth(0).locator("dd")).toHaveText(["1", "4"]);
-  await expect(group.locator(".admin-stats-period").nth(1).locator("dd")).toHaveText(["2", "6", "8", "3"]);
-  await expect(group.locator(".admin-stats-period").nth(2).locator("dd")).toHaveText(["9", "22", "44", "11"]);
+  await expect(group.locator(".admin-stats-period").nth(1).locator("dd")).toHaveText(["2", "6", "8", "1", "3"]);
+  await expect(group.locator(".admin-stats-period").nth(2).locator("dd")).toHaveText(["9", "22", "44", "5", "11"]);
   await expect(countries.getByText("Counts are page views, not unique visitors.", { exact: true })).toBeVisible();
   const dbIpAttribution = countries.getByRole("link", { name: "IP Geolocation by DB-IP", exact: true });
   await expect(dbIpAttribution).toHaveAttribute("href", "https://db-ip.com");
@@ -1004,6 +1006,79 @@ test("three contexts use a reusable no-history E2E room, rekey on membership cha
   await creatorContext.close();
   await bContext.close();
   await rejoinContext.close();
+});
+
+test("owner seals a room while admitted participants keep chatting and the old invite becomes HTTP 410", async ({ browser, context, page: creator, baseURL }) => {
+  await installWorkingClipboard(context);
+  const before = await (await creator.request.get(`${baseURL}/__stats`)).json() as {
+    groups: { totals: Record<string, number> };
+  };
+
+  await navigateDocument(creator, baseURL!);
+  await creator.getByRole("button", { name: "Create a room", exact: true }).click();
+  const invite = await creator.getByLabel("Reusable room link").inputValue();
+  const initialSealButton = creator.getByRole("button", { name: "Seal room", exact: true });
+  await expect(initialSealButton).toBeVisible();
+  await creator.setViewportSize({ width: 390, height: 844 });
+  await expect(initialSealButton).toBeVisible();
+  expect(await creator.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await creator.setViewportSize({ width: 1280, height: 720 });
+  const peerContext = await browser.newContext();
+  const peer = await peerContext.newPage();
+  await openGroupInvite(peer, invite);
+  await expect(creator.locator("#group-message")).toBeEnabled();
+  await expect(peer.locator("#group-message")).toBeEnabled();
+
+  await creator.bringToFront();
+  await creator.locator("#group-message").fill("before seal");
+  await creator.locator("#group-message").press("Enter");
+  await expect(peer.locator(".message").filter({ hasText: "before seal" })).toHaveCount(1);
+
+  const sealButton = creator.getByRole("button", { name: "Seal room", exact: true });
+  await sealButton.click();
+  const sealDialog = creator.getByRole("dialog", { name: "Seal this room?" });
+  await expect(sealDialog.getByText("New people won't be able to join.", { exact: true })).toHaveCount(1);
+  const confirmSeal = sealDialog.getByRole("button", { name: "Seal", exact: true });
+  await confirmSeal.click();
+  await expect(creator.getByText("Sealed", { exact: true })).toHaveCount(1);
+  await expect(peer.getByText("Sealed", { exact: true })).toHaveCount(1);
+  await expect(creator.getByRole("button", { name: "Invite", exact: true })).toHaveCount(0);
+  await expect(creator.getByRole("button", { name: "Seal room", exact: true })).toHaveCount(0);
+  await expect(creator.getByRole("button", { name: "Show QR", exact: true })).toHaveCount(0);
+
+  const lateContext = await browser.newContext();
+  const late = await lateContext.newPage();
+  const goneResponse = await navigateDocument(late, invite);
+  expect(goneResponse.status()).toBe(410);
+  await waitForGone(late);
+
+  await peer.bringToFront();
+  await peer.locator("#group-message").fill("after seal from peer");
+  await peer.locator("#group-message").press("Enter");
+  await expect(creator.locator(".message").filter({ hasText: "after seal from peer" })).toHaveCount(1);
+  await creator.bringToFront();
+  await creator.locator("#group-message").fill("after seal from owner");
+  await creator.locator("#group-message").press("Enter");
+  await expect(peer.locator(".message").filter({ hasText: "after seal from owner" })).toHaveCount(1);
+
+  const afterSeal = await (await creator.request.get(`${baseURL}/__stats`)).json() as typeof before;
+  expect(afterSeal.groups.totals.group_rooms_sealed - before.groups.totals.group_rooms_sealed).toBe(1);
+
+  await creator.bringToFront();
+  const destroyButton = creator.getByRole("button", { name: "Destroy room", exact: true });
+  await destroyButton.click();
+  const destroyDialog = creator.getByRole("dialog", { name: "Destroy this room?" });
+  const creatorGone = creator.waitForResponse((response) => response.status() === 410 && response.request().resourceType() === "document");
+  const peerGone = peer.waitForResponse((response) => response.status() === 410 && response.request().resourceType() === "document");
+  const confirmDestroy = destroyDialog.getByRole("button", { name: "Destroy room", exact: true });
+  await confirmDestroy.click();
+  expect((await creatorGone).status()).toBe(410);
+  expect((await peerGone).status()).toBe(410);
+  await waitForGone(creator);
+  await waitForGone(peer);
+
+  await peerContext.close();
+  await lateContext.close();
 });
 
 test("room personas persist per browser while tabs remain separate live participants", async ({ browser, baseURL }) => {

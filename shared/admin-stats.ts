@@ -10,6 +10,7 @@ export interface AdminGroupMetricCounts {
   group_rooms_created: number;
   group_participants_joined: number;
   group_messages_relayed: number;
+  group_rooms_sealed: number;
   group_responses_410: number;
 }
 

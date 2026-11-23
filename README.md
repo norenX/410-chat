@@ -39,7 +39,8 @@ not imply that the protocol has been audited or is ready for production.
 
 The current group-room limits are:
 
-- reusable invite while the room is alive;
+- reusable invite while the room is open; the creator may irreversibly Seal
+  the room to stop all new joins while admitted participants continue;
 - up to 10 simultaneous participants;
 - 15-second disconnect grace;
 - rekey on join, final leave, and reconnect;

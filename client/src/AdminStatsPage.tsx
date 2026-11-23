@@ -20,6 +20,7 @@ const GROUP_FIELDS = [
   ["rooms", "group_rooms_created"],
   ["joins", "group_participants_joined"],
   ["messages", "group_messages_relayed"],
+  ["sealed", "group_rooms_sealed"],
   ["410", "group_responses_410"]
 ] as const satisfies ReadonlyArray<readonly [string, keyof AdminGroupMetricCounts]>;
 

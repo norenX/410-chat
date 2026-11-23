@@ -32,12 +32,14 @@ export function adminStatsSnapshot(snapshot: MetricsSnapshot): AdminStatsSnapsho
         group_rooms_created: snapshot.groups.today.group_rooms_created,
         group_participants_joined: snapshot.groups.today.group_participants_joined,
         group_messages_relayed: snapshot.groups.today.group_messages_relayed,
+        group_rooms_sealed: snapshot.groups.today.group_rooms_sealed,
         group_responses_410: snapshot.groups.today.group_responses_410
       },
       totals: {
         group_rooms_created: snapshot.groups.totals.group_rooms_created,
         group_participants_joined: snapshot.groups.totals.group_participants_joined,
         group_messages_relayed: snapshot.groups.totals.group_messages_relayed,
+        group_rooms_sealed: snapshot.groups.totals.group_rooms_sealed,
         group_responses_410: snapshot.groups.totals.group_responses_410
       }
     },

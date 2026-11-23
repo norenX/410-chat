@@ -230,6 +230,10 @@ export async function createChatServer(options: ChatServerOptions): Promise<Chat
       metrics.incrementGroup("group_messages_relayed");
       externalGroupHooks?.onMessageRelayed?.(source);
     },
+    onSealed: () => {
+      metrics.incrementGroup("group_rooms_sealed");
+      externalGroupHooks?.onSealed?.();
+    },
     onDestroyed: (reason) => {
       const name = groupDestructionMetric[reason];
       if (name) metrics.incrementGroup(name);

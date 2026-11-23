@@ -22,6 +22,7 @@ export const GROUP_METRIC_NAMES = [
   "group_participants_joined",
   "group_conversations_started",
   "group_messages_relayed",
+  "group_rooms_sealed",
   "group_destroyed_manual",
   "group_destroyed_ttl",
   "group_responses_410"
@@ -44,7 +45,7 @@ export type SourceBuckets = Partial<Record<AttributionSource, SourceMetricCounts
 export type GeoCounts = Record<string, number>;
 
 interface MetricsDocument {
-  version: 4;
+  version: 5;
   totals: MetricCounts;
   days: Record<string, MetricCounts>;
   sources: {
@@ -147,7 +148,7 @@ function sourceMetricsFromCounts(counts: MetricCounts): SourceMetricCounts {
 
 function emptyDocument(): MetricsDocument {
   return {
-    version: 4,
+    version: 5,
     totals: emptyCounts(),
     days: {},
     sources: {
@@ -187,12 +188,13 @@ function parseCounts(value: unknown): MetricCounts | null {
   return counts;
 }
 
-function parseGroupCounts(value: unknown): GroupMetricCounts | null {
+function parseGroupCounts(value: unknown, allowMissingSealed = false): GroupMetricCounts | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   const counts = emptyGroupCounts();
   for (const name of GROUP_METRIC_NAMES) {
     const count = record[name];
+    if (name === "group_rooms_sealed" && count === undefined && allowMissingSealed) continue;
     if (!Number.isSafeInteger(count) || (count as number) < 0) return null;
     counts[name] = count as number;
   }
@@ -286,7 +288,10 @@ function parseDocument(value: unknown): MetricsDocument | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
 
-  if (record.version !== 1 && record.version !== 2 && record.version !== 3 && record.version !== 4) return null;
+  if (
+    record.version !== 1 && record.version !== 2 && record.version !== 3 &&
+    record.version !== 4 && record.version !== 5
+  ) return null;
 
   const totals = parseCounts(record.totals);
   if (!totals || !record.days || typeof record.days !== "object" || Array.isArray(record.days)) return null;
@@ -309,7 +314,7 @@ function parseDocument(value: unknown): MetricsDocument | null {
     }
 
     return {
-      version: 4,
+      version: 5,
       totals,
       days,
       sources: {
@@ -340,18 +345,18 @@ function parseDocument(value: unknown): MetricsDocument | null {
   let groupTotals = emptyGroupCounts();
   const groupDays: Record<string, GroupMetricCounts> = {};
 
-  if ((record.version === 3 || record.version === 4) && record.groups !== undefined) {
+  if ((record.version === 3 || record.version === 4 || record.version === 5) && record.groups !== undefined) {
     if (!record.groups || typeof record.groups !== "object" || Array.isArray(record.groups)) return null;
     const groupRecord = record.groups as Record<string, unknown>;
     if (groupRecord.totals !== undefined) {
-      const parsedTotals = parseGroupCounts(groupRecord.totals);
+      const parsedTotals = parseGroupCounts(groupRecord.totals, record.version !== 5);
       if (!parsedTotals) return null;
       groupTotals = parsedTotals;
     }
     if (groupRecord.days !== undefined) {
       if (!groupRecord.days || typeof groupRecord.days !== "object" || Array.isArray(groupRecord.days)) return null;
       for (const [day, rawCounts] of Object.entries(groupRecord.days as Record<string, unknown>)) {
-        const counts = parseGroupCounts(rawCounts);
+        const counts = parseGroupCounts(rawCounts, record.version !== 5);
         if (!isUtcDay(day) || !counts) return null;
         groupDays[day] = counts;
       }
@@ -361,7 +366,7 @@ function parseDocument(value: unknown): MetricsDocument | null {
   let geoTotals: GeoCounts = {};
   let geoDays: Record<string, GeoCounts> = {};
 
-  if (record.version === 4 && record.geo !== undefined) {
+  if ((record.version === 4 || record.version === 5) && record.geo !== undefined) {
     if (!record.geo || typeof record.geo !== "object" || Array.isArray(record.geo)) return null;
     const geoRecord = record.geo as Record<string, unknown>;
     const parsedTotals = parseGeoCounts(geoRecord.totals);
@@ -372,7 +377,7 @@ function parseDocument(value: unknown): MetricsDocument | null {
   }
 
   return {
-    version: 4,
+    version: 5,
     totals,
     days,
     sources: {
@@ -427,7 +432,7 @@ export class MetricsStore {
         typeof decoded === "object" &&
         !Array.isArray(decoded) &&
         (
-          (decoded as Record<string, unknown>).version !== 4 ||
+          (decoded as Record<string, unknown>).version !== 5 ||
           (decoded as Record<string, unknown>).geo === undefined
         )
       ) {

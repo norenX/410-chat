@@ -571,6 +571,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 }
 
 .group-room-summary {
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   align-items: baseline;
@@ -600,15 +601,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .group-self-persona strong { font-weight: 700; }
 
 .group-room-actions {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 18px;
   color: var(--muted);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .group-room-actions button {
+  flex: 0 0 auto;
   border: 0;
   background: transparent;
   padding: 6px 0;
@@ -618,6 +622,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 }
 
 .group-room-actions .group-destroy { color: #7d1717; }
+
+.group-sealed-status {
+  color: #555;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 
 .group-invite-panel {
   flex: 0 0 auto;
@@ -948,10 +960,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
   .message { max-width: 88%; }
   .composer { margin: 0; padding: 14px 20px max(18px, env(safe-area-inset-bottom)); }
   .connection-state { flex-direction: column; align-items: center; gap: 3px; }
-  .group-room-header { align-items: flex-start; gap: 14px; padding-top: 16px; padding-bottom: 16px; }
+  .group-room-header { flex-direction: column; align-items: stretch; gap: 14px; padding-top: 16px; padding-bottom: 16px; }
   .group-room-summary { flex-direction: column; gap: 4px; }
-  .group-room-actions { flex-wrap: wrap; gap: 10px 14px; }
-  .group-room-actions > span { width: 100%; text-align: right; }
+  .group-room-actions { flex-wrap: wrap; justify-content: flex-start; gap: 10px 14px; }
+  .group-room-actions > span { width: 100%; text-align: left; }
   .group-invite-panel { padding: 16px 20px 18px; }
   .group-invite-row { grid-template-columns: minmax(0, 1fr) auto; }
   .group-invite-row input { grid-column: 1 / -1; }

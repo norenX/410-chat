@@ -302,6 +302,82 @@ afterEach(async () => {
 });
 
 describe("experimental group room lifecycle", () => {
+  it("seals a room for new joins while preserving E2E messaging, resume, Destroy, and aggregate metrics", async () => {
+    await groupSodiumReady();
+    const { server, httpUrl, wsUrl } = await start({ disconnectGraceMs: 500 });
+    const owner = ownerCredentials();
+    const created = await createGroup(httpUrl, owner.verifier, owner.recoveryVerifier);
+    const linkSecret = token();
+    const a = await SecureGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken,
+      ownerCapability: owner.capability
+    }, linkSecret);
+    const b = await SecureGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken
+    }, linkSecret);
+    await waitUntil(() => a.activeEpoch === 2 && b.activeEpoch === 2);
+
+    b.send({ type: "group_seal", ownerCapability: token() });
+    await b.events.waitFor("group_forbidden");
+    expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(200);
+
+    a.send({ type: "group_seal", ownerCapability: owner.capability });
+    await Promise.all([
+      a.events.waitFor("group_room_sealed"),
+      b.events.waitFor("group_room_sealed")
+    ]);
+    expect(server.groupManager.currentCounts()).toMatchObject({ rooms: 1, participants: 2, connected: 2 });
+    expect(server.groupManager.stats().inviteTokens).toBe(0);
+
+    const sealedInvite = await fetch(`${httpUrl}/g/${created.inviteToken}`);
+    expect(sealedInvite.status).toBe(410);
+    expect(sealedInvite.headers.get("cache-control")).toBe("no-store");
+    expect(sealedInvite.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+
+    const late = await RawGroupClient.connect(wsUrl, {
+      type: "group_join",
+      inviteToken: created.inviteToken
+    });
+    await late.events.waitFor("group_room_gone");
+    expect(server.groupManager.stats().participants).toBe(2);
+
+    a.sendMessage("sealed-a", "still encrypted after seal");
+    await waitUntil(() => b.messages.some((message) => message.id === "sealed-a"));
+    b.sendMessage("sealed-b", "reply after seal");
+    await waitUntil(() => a.messages.some((message) => message.id === "sealed-b"));
+
+    a.send({ type: "group_seal", ownerCapability: owner.capability });
+    await a.events.waitFor("group_room_sealed");
+    let stats = await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot;
+    expect(stats.groups.totals.group_rooms_sealed).toBe(1);
+
+    const bSession = b.session!;
+    b.close();
+    const resumedB = await SecureGroupClient.connect(wsUrl, {
+      type: "group_resume",
+      roomId: bSession.roomId,
+      memberId: bSession.memberId,
+      resumeToken: bSession.resumeToken
+    }, linkSecret);
+    await waitUntil(() => a.activeEpoch === 3 && resumedB.activeEpoch === 3);
+    expect(resumedB.session?.state).toBe("SEALED");
+    resumedB.sendMessage("resumed-sealed", "resume remains available");
+    await waitUntil(() => a.messages.some((message) => message.id === "resumed-sealed"));
+
+    a.send({ type: "group_destroy", ownerCapability: owner.capability });
+    await Promise.all([
+      a.events.waitFor("group_destroyed"),
+      resumedB.events.waitFor("group_destroyed")
+    ]);
+    expect(server.groupManager.stats()).toMatchObject({ activeRooms: 0, inviteTokens: 0, resumeTokens: 0 });
+    expect((await fetch(`${httpUrl}/g/${created.inviteToken}`)).status).toBe(410);
+    stats = await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot;
+    expect(stats.groups.totals.group_rooms_sealed).toBe(1);
+    expect(stats.groups.totals.group_destroyed_manual).toBe(1);
+  });
+
   it("exchanges E2E messages without history, rekeys on resume, enforces owner destroy, and returns real 410", async () => {
     await groupSodiumReady();
     const { server, httpUrl, wsUrl } = await start();
@@ -394,6 +470,7 @@ describe("experimental group room lifecycle", () => {
       group_participants_joined: 3,
       group_conversations_started: 1,
       group_messages_relayed: 4,
+      group_rooms_sealed: 0,
       group_destroyed_manual: 1,
       group_destroyed_ttl: 0,
       group_responses_410: 1
@@ -718,15 +795,19 @@ describe("experimental group room lifecycle", () => {
       type: "group_join",
       inviteToken: created.inviteToken,
       browserVerifier,
-      tabVerifier: token()
+      tabVerifier: token(),
+      ownerCapability: owner.capability
     });
     await participant.events.waitFor("group_session");
+    participant.send({ type: "group_seal", ownerCapability: owner.capability });
+    await participant.events.waitFor("group_room_sealed");
     expect(server.groupManager.stats().activeRooms).toBe(1);
     expect(server.groupManager.stats()).toMatchObject({ personaMappings: 1, usedPersonas: 1 });
     await waitUntil(() => server.groupManager.stats().activeRooms === 0, 1_000);
     const gone = await fetch(`${httpUrl}/g/${created.inviteToken}`);
     expect(gone.status).toBe(410);
     const stats = await (await fetch(`${httpUrl}/__stats`)).json() as MetricsSnapshot;
+    expect(stats.groups.totals.group_rooms_sealed).toBe(1);
     expect(stats.groups.totals.group_destroyed_ttl).toBe(1);
     expect(stats.groups.totals.group_responses_410).toBe(1);
     expect(server.groupManager.stats()).toMatchObject({
@@ -950,8 +1031,8 @@ describe("experimental group room lifecycle", () => {
       group: { now: { rooms: number; people: number }; today: Record<string, number>; totals: Record<string, number> };
     };
     expect(adminStats.group.now).toEqual({ rooms: 0, people: 0 });
-    expect(Object.values(adminStats.group.today)).toEqual([0, 0, 0, 0]);
-    expect(Object.values(adminStats.group.totals)).toEqual([0, 0, 0, 0]);
+    expect(Object.values(adminStats.group.today)).toEqual([0, 0, 0, 0, 0]);
+    expect(Object.values(adminStats.group.totals)).toEqual([0, 0, 0, 0, 0]);
     expect((await fetch(`${httpUrl}/g/${token()}`)).status).toBe(410);
     expect(await (await fetch(`${httpUrl}/api/features`)).json()).toEqual({ groupRooms: false });
   });

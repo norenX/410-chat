@@ -272,6 +272,9 @@ export function GroupRoomApp() {
   const [qrOpen, setQrOpen] = useState(false);
   const [destroyConfirm, setDestroyConfirm] = useState(false);
   const [destroying, setDestroying] = useState(false);
+  const [sealed, setSealed] = useState(false);
+  const [sealConfirm, setSealConfirm] = useState(false);
+  const [sealing, setSealing] = useState(false);
   const [sendPending, setSendPending] = useState(false);
   const [selfPersona, setSelfPersona] = useState<GroupPersona | null>(null);
 
@@ -293,6 +296,7 @@ export function GroupRoomApp() {
   const shouldAutoScrollRef = useRef(true);
   const qrTriggerRef = useRef<HTMLButtonElement | null>(null);
   const pendingRelayRef = useRef<PendingRelay | null>(null);
+  const ownerActionRef = useRef<"seal" | "destroy" | undefined>(undefined);
   const browserVerifierRef = useRef("");
   const tabVerifierRef = useRef("");
   const ownerRecoverySecretRef = useRef("");
@@ -468,8 +472,24 @@ export function GroupRoomApp() {
       return;
     }
     if (event.type === "group_forbidden") {
-      setDestroying(false);
-      setNotice("This browser is not authorized to destroy the room.");
+      if (ownerActionRef.current === "seal") {
+        setSealing(false);
+        setNotice("This browser is not authorized to seal the room.");
+      } else {
+        setDestroying(false);
+        setNotice("This browser is not authorized to destroy the room.");
+      }
+      ownerActionRef.current = undefined;
+      return;
+    }
+    if (event.type === "group_room_sealed") {
+      ownerActionRef.current = undefined;
+      setSealed(true);
+      setSealing(false);
+      setSealConfirm(false);
+      setShareOpen(false);
+      setQrOpen(false);
+      setCopyState("idle");
       return;
     }
     if (event.type === "group_rate_limited") {
@@ -533,13 +553,14 @@ export function GroupRoomApp() {
       resumeFallbackRef.current = false;
       fullRef.current = false;
       setOwnerAuthorized(event.ownerAuthorized);
+      setSealed(event.state === "SEALED");
       if (!validPersona(event.persona)) throw new Error("Invalid self persona");
       setSelfPersona({ ...event.persona });
       setPresenceCount(event.presenceCount);
       setMaxParticipants(event.maxParticipants);
       setExpiresAt(event.expiresAt);
       setRemaining(event.expiresAt - Date.now());
-      setShareOpen(existing.showInviteOnLoad === true);
+      setShareOpen(event.state === "OPEN" && existing.showInviteOnLoad === true);
       setNotice("");
       if (heartbeatRef.current) window.clearInterval(heartbeatRef.current);
       heartbeatRef.current = window.setInterval(() => send({ type: "heartbeat" }), event.heartbeatEveryMs);
@@ -787,6 +808,7 @@ export function GroupRoomApp() {
     const local = sessionRef.current;
     if (!local?.ownerCapability || !local.roomId) return;
     const { ownerCapability, roomId } = local;
+    ownerActionRef.current = "destroy";
     setDestroying(true);
     setDestroyConfirm(false);
     if (socketRef.current?.readyState === WebSocket.OPEN && ownerAuthorized) {
@@ -808,6 +830,19 @@ export function GroupRoomApp() {
         setNotice("This browser is not authorized to destroy the room.");
       }
     });
+  }
+
+  function requestSeal(): void {
+    const ownerCapability = sessionRef.current?.ownerCapability;
+    if (!ownerCapability || !ownerAuthorized || sealed) return;
+    ownerActionRef.current = "seal";
+    setSealing(true);
+    setSealConfirm(false);
+    if (!send({ type: "group_seal", ownerCapability })) {
+      ownerActionRef.current = undefined;
+      setSealing(false);
+      setNotice("The room could not be sealed. Please try again.");
+    }
   }
 
   if (view === "connecting") {
@@ -864,12 +899,19 @@ export function GroupRoomApp() {
         </div>
         <div className="group-room-actions">
           <span>Ends in {formatRemaining(remaining)}</span>
-          <button type="button" onClick={() => setShareOpen((current) => !current)} aria-expanded={shareOpen}>Invite</button>
+          {sealed ? (
+            <span className="group-sealed-status" role="status">Sealed</span>
+          ) : (
+            <button type="button" onClick={() => setShareOpen((current) => !current)} aria-expanded={shareOpen}>Invite</button>
+          )}
+          {ownerAuthorized && !sealed && (
+            <button type="button" onClick={() => setSealConfirm(true)}>Seal room</button>
+          )}
           {ownerAuthorized && <button className="group-destroy" type="button" onClick={() => setDestroyConfirm(true)}>Destroy room</button>}
         </div>
       </header>
 
-      {shareOpen && (
+      {!sealed && shareOpen && (
         <section className="group-invite-panel" aria-label="Room invite">
           <p>Share this link with people you want in the room.</p>
           <div className="group-invite-row">
@@ -934,7 +976,8 @@ export function GroupRoomApp() {
       </form>
 
       {destroyConfirm && <DestroyRoomDialog destroying={destroying} onCancel={() => setDestroyConfirm(false)} onDestroy={requestDestroy} />}
-      {qrOpen && inviteUrl && (
+      {sealConfirm && <SealRoomDialog sealing={sealing} onCancel={() => setSealConfirm(false)} onSeal={requestSeal} />}
+      {!sealed && qrOpen && inviteUrl && (
         <QrInviteDialog
           inviteUrl={inviteUrl}
           note="This invite works while the room exists."
@@ -970,6 +1013,27 @@ function DestroyRoomDialog({ destroying, onCancel, onDestroy }: {
         <div>
           <button type="button" onClick={onCancel} disabled={destroying}>Cancel</button>
           <button className="danger-action" type="button" onClick={onDestroy} disabled={destroying}>Destroy room</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SealRoomDialog({ sealing, onCancel, onSeal }: {
+  sealing: boolean;
+  onCancel: () => void;
+  onSeal: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !sealing) onCancel();
+    }}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="seal-room-title">
+        <h2 id="seal-room-title">Seal this room?</h2>
+        <p>{"New people won't be able to join."}</p>
+        <div>
+          <button type="button" onClick={onCancel} disabled={sealing}>Cancel</button>
+          <button type="button" onClick={onSeal} disabled={sealing}>Seal</button>
         </div>
       </section>
     </div>

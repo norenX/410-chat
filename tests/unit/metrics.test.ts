@@ -37,7 +37,7 @@ describe("MetricsStore", () => {
       days: Record<string, Record<string, number>>;
       geo: { totals: Record<string, number>; days: Record<string, Record<string, number>> };
     };
-    expect(persisted.version).toBe(4);
+    expect(persisted.version).toBe(5);
     expect(Object.keys(persisted.totals)).toEqual([...METRIC_NAMES]);
     expect(Object.keys(persisted.days)).toEqual(["2026-08-20", "2026-08-21"]);
     expect(persisted.days["2026-08-20"].homepage_views).toBe(1);
@@ -139,7 +139,7 @@ describe("MetricsStore", () => {
       };
     };
 
-    expect(persisted.version).toBe(4);
+    expect(persisted.version).toBe(5);
     expect(persisted.totals).toEqual(totals);
     expect(persisted.sources.totals.unattributed).toEqual({
       homepage_views: 394,
@@ -163,7 +163,7 @@ describe("MetricsStore", () => {
       Object.fromEntries(METRIC_NAMES.map((name) => [name, 0]))
     );
     await store.close();
-    expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(4);
+    expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(5);
   });
 
   it("migrates version 2 metrics and starts isolated group counters at zero", async () => {
@@ -204,7 +204,7 @@ describe("MetricsStore", () => {
       Object.fromEntries(GROUP_METRIC_NAMES.map((name) => [name, 0]))
     );
     await store.close();
-    expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(4);
+    expect(JSON.parse(await fs.readFile(filePath, "utf8")).version).toBe(5);
   });
 
   it("loads version 3 direct history when the optional group section is absent", async () => {
@@ -239,6 +239,52 @@ describe("MetricsStore", () => {
     expect(snapshot.groups.today).toEqual(snapshot.groups.totals);
     expect(snapshot.geo).toEqual({ today: {}, totals: {} });
     await store.close();
+  });
+
+  it("migrates version 4 group counters and initializes the sealed counter without data loss", async () => {
+    const filePath = await temporaryMetricsFile();
+    const now = Date.parse("2026-08-23T12:00:00Z");
+    const totals = Object.fromEntries(METRIC_NAMES.map((name) => [name, 0]));
+    const sourceCounts = {
+      homepage_views: 0,
+      rooms_created: 0,
+      conversations_started: 0,
+      messages_relayed: 0
+    };
+    const legacyGroups = Object.fromEntries(
+      GROUP_METRIC_NAMES
+        .filter((name) => name !== "group_rooms_sealed")
+        .map((name, index) => [name, index + 1])
+    );
+    await fs.writeFile(filePath, JSON.stringify({
+      version: 4,
+      totals,
+      days: { "2026-08-23": totals },
+      sources: {
+        totals: { direct: sourceCounts },
+        days: { "2026-08-23": { direct: sourceCounts } }
+      },
+      groups: {
+        totals: legacyGroups,
+        days: { "2026-08-23": legacyGroups }
+      },
+      geo: { totals: { DE: 3 }, days: { "2026-08-23": { DE: 3 } } }
+    }));
+
+    const store = new MetricsStore(filePath, { now: () => now });
+    await store.init();
+    const snapshot = store.snapshot({ waiting: 0, active: 0 });
+    expect(snapshot.groups.totals).toEqual({ ...legacyGroups, group_rooms_sealed: 0 });
+    expect(snapshot.groups.today).toEqual({ ...legacyGroups, group_rooms_sealed: 0 });
+    expect(snapshot.geo.totals).toEqual({ DE: 3 });
+    store.incrementGroup("group_rooms_sealed");
+    await store.close();
+    const persisted = JSON.parse(await fs.readFile(filePath, "utf8")) as {
+      version: number;
+      groups: { totals: Record<string, number> };
+    };
+    expect(persisted.version).toBe(5);
+    expect(persisted.groups.totals.group_rooms_sealed).toBe(1);
   });
 
   it("persists only normalized aggregate country codes, never raw IP values", async () => {
