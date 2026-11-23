@@ -1161,6 +1161,8 @@ test("owner seals a room while admitted participants keep chatting and the old i
   await openGroupInvite(peer, invite);
   await expect(creator.locator("#group-message")).toBeEnabled();
   await expect(peer.locator("#group-message")).toBeEnabled();
+  const creatorPersonaStyle = await creator.locator(".group-self-persona strong").getAttribute("style");
+  const peerPersonaStyle = await peer.locator(".group-self-persona strong").getAttribute("style");
 
   await creator.bringToFront();
   await creator.locator("#group-message").fill("before seal");
@@ -1182,6 +1184,8 @@ test("owner seals a room while admitted participants keep chatting and the old i
   await expect(peer.locator(".group-presence-event").filter({
     hasText: "Room sealed. No one else can join."
   })).toHaveCount(1);
+  expect(await creator.locator(".group-self-persona strong").getAttribute("style")).toBe(creatorPersonaStyle);
+  expect(await peer.locator(".group-self-persona strong").getAttribute("style")).toBe(peerPersonaStyle);
   const immediatelyAfterSeal = await (await creator.request.get(`${baseURL}/__stats`)).json() as typeof before;
   expect(
     immediatelyAfterSeal.groups.totals.group_messages_relayed -
@@ -1305,6 +1309,7 @@ test("room personas persist per browser while tabs remain separate live particip
   await primary.reload({ waitUntil: "domcontentloaded" });
   await expect(primary.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
   await expect(primary.locator(".group-self-persona strong")).toHaveText(primaryName);
+  expect(await primary.locator(".group-self-persona strong").getAttribute("style")).toBe(primaryStyle);
   await expect(primary.locator(".message")).toHaveCount(0);
   const memberAfterReload = await primary.evaluate(() => {
     const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { memberId?: string } | null;
@@ -1319,6 +1324,7 @@ test("room personas persist per browser while tabs remain separate live particip
   await openGroupInvite(returnedPrimary, invite);
   await expect(returnedPrimary.locator("#group-message")).toBeEnabled({ timeout: 10_000 });
   await expect(returnedPrimary.locator(".group-self-persona strong")).toHaveText(primaryName);
+  expect(await returnedPrimary.locator(".group-self-persona strong").getAttribute("style")).toBe(primaryStyle);
   await expect(returnedPrimary.locator(".message")).toHaveCount(0);
   const returnedMemberId = await returnedPrimary.evaluate(() => {
     const session = JSON.parse(sessionStorage.getItem("410.group.session.v1") || "null") as { memberId?: string } | null;

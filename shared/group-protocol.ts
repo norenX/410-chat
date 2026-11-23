@@ -21,18 +21,16 @@ export interface GroupMemberPersona extends GroupPersona {
 }
 
 export const GROUP_PERSONA_COLORS = [
-  "#9C2A2A",
-  "#7A4E00",
-  "#0A6B4F",
-  "#1C5D99",
-  "#6240A0",
-  "#A13A73",
-  "#2A6F73",
-  "#6B4F3A",
-  "#465E15",
-  "#8A3B12",
-  "#315B7D",
-  "#5A3F7A"
+  "#0057D9",
+  "#16823A",
+  "#C45100",
+  "#6A35C9",
+  "#C62828",
+  "#007C78",
+  "#B42373",
+  "#3949AB",
+  "#006B8F",
+  "#8E24AA"
 ] as const;
 
 export type GroupClientCommand =
